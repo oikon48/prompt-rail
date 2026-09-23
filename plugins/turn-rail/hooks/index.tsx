@@ -26,6 +26,10 @@ const PASS_MS = 150
 // Cells kept left of the horizontal rail: off the window's edge, a pointer
 // leaving the first bar crosses a cell and the surface sees the hover end.
 const RAIL_INSET = 2
+// The engine's refusal when no row is drawn under an id, as for a slash
+// command's own row, which the transcript file holds but the surface skips.
+// Other refusals (a race with another move) pass, so they leave the tick be.
+const NOT_DRAWN = /nothing drawn/
 
 // vertical: ticks in a docked pane; horizontal: ticks in a row above the prompt.
 type Mode = 'vertical' | 'horizontal'
@@ -68,6 +72,21 @@ const oneLine = (text: string, width: number) => {
     used += cells(char)
   }
   return `${out}…`
+}
+
+// A stacked rail reads rows apart; a row of ticks needs upright bars to. A
+// dotted one marks a prompt the transcript does not draw, so a jump fails.
+export const tick = (isCurrent: boolean, isUnreachable = false) => (isCurrent ? '━' : isUnreachable ? '┄' : '─')
+export const bar = (isCurrent: boolean, isUnreachable = false) => (isCurrent ? '┃' : isUnreachable ? '┆' : '│')
+
+// Record what a jump to `id` answered: a landing makes it reachable, a refusal
+// for want of a drawn row unreachable, any other refusal says nothing. True
+// when the set changed.
+export const noteScroll = (unreachable: Set<string>, id: string, deny: string | undefined) => {
+  const was = unreachable.has(id)
+  if (deny === undefined) unreachable.delete(id)
+  else if (NOT_DRAWN.test(deny)) unreachable.add(id)
+  return unreachable.has(id) !== was
 }
 
 type TranscriptIndex = {
@@ -184,6 +203,8 @@ export const register: Register = (on) => {
   const onScreen = new Map<string, boolean>()
   let pass = { at: 0, rows: new Map<string, boolean>() }
   let lastCurrent = -1
+  // Prompts whose rows the surface does not draw, learnt from a refused jump.
+  const unreachable = new Set<string>()
 
   const addPrompt = (id: string, text: string) => {
     // A new prompt is drawn under a provisional id before it is stored, then
@@ -285,6 +306,7 @@ export const register: Register = (on) => {
       onScreen.clear()
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
+      unreachable.clear()
     } else {
       const index = await readTranscript($, e.transcript_path)
       if (index) merge(index)
@@ -335,9 +357,7 @@ export const register: Register = (on) => {
     return next(e)
   })
 
-  // A stacked rail reads rows apart; a row of ticks needs upright bars to.
-  const tick = (isCurrent: boolean) => (isCurrent ? '━' : '─')
-  const bar = (isCurrent: boolean) => (isCurrent ? '┃' : '│')
+  const isUnreachable = (i: number) => unreachable.has(entries[i]?.id ?? '')
 
   on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -370,7 +390,7 @@ export const register: Register = (on) => {
               key={`jump-${i}`}
               plain
               dimColor={i !== current}
-              label={hasRoom ? ` ${tick(i === current)} ${oneLine(entry.text, width)}` : ` ${tick(i === current)} `}
+              label={hasRoom ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}` : ` ${tick(i === current, isUnreachable(i))} `}
               hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
             />
@@ -387,7 +407,7 @@ export const register: Register = (on) => {
             key={`jump-${i}`}
             plain
             dimColor={i !== current}
-            label={`${tick(i === current)} ${oneLine(entry.text, width)}`}
+            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`}
             onPress={() => {}}
           />
         ))}
@@ -435,7 +455,7 @@ export const register: Register = (on) => {
               {shown.map((entry, offset) => {
                 const i = first + offset
                 // An empty upper cell turns solid under the hover's inverse.
-                const glyph = row === 'lower' ? bar(i === current) : i === current ? '┃' : ' '
+                const glyph = row === 'lower' ? bar(i === current, isUnreachable(i)) : i === current ? '┃' : ' '
                 return (
                   <Button
                     key={row === 'lower' ? `jump-${i}` : `jump-${i}-upper`}
@@ -477,6 +497,7 @@ export const register: Register = (on) => {
     try {
       const result = await $.ui.scroll({ to: { requestId: entry.id }, block: 'start' })
       if (result.deny) $.ui.toast(`turn-rail: ${result.deny}`)
+      if (noteScroll(unreachable, entry.id, result.deny)) $.ui.invalidate('ui.render')
     } catch (err) {
       $.ui.toast(`turn-rail: ${(err as Error).message}`)
     }

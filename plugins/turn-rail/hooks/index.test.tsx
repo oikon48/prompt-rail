@@ -1,4 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
+import { bar, noteScroll, tick } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -309,4 +310,37 @@ test('an overflowing horizontal rail keeps the prompt being read near the end', 
   const { lower, marks } = await overflowBand($, on, 10)
   expect(lower).toEqual(['jump-4', 'jump-5', 'jump-6', 'jump-7', 'jump-8', 'jump-9', 'jump-10', 'jump-11'])
   expect(marks).toEqual(['‹'])
+})
+
+// The engine's answer for a row the transcript does not draw (a slash
+// command's own row, for one), and one for a move that lost a race. The kit
+// does not answer a plugin's scroll to a transcript row, so the press itself
+// is checked in a live session; these pin what the plugin makes of an answer.
+const NOT_DRAWN = 'nothing drawn under that requestId'
+const MOVED = 'the window moved meanwhile'
+
+test('a jump refused because nothing is drawn marks the prompt unreachable', () => {
+  const unreachable = new Set<string>()
+  expect(noteScroll(unreachable, 'm1', NOT_DRAWN)).toBe(true)
+  expect([...unreachable]).toEqual(['m1'])
+  // Told again, nothing changes, so nothing is redrawn.
+  expect(noteScroll(unreachable, 'm1', NOT_DRAWN)).toBe(false)
+})
+
+test('a jump refused for a passing reason leaves the prompt as it was', () => {
+  const unreachable = new Set<string>(['m2'])
+  expect(noteScroll(unreachable, 'm1', MOVED)).toBe(false)
+  expect(noteScroll(unreachable, 'm2', MOVED)).toBe(false)
+  expect([...unreachable]).toEqual(['m2'])
+})
+
+test('a jump that lands makes the prompt reachable again', () => {
+  const unreachable = new Set<string>(['m1'])
+  expect(noteScroll(unreachable, 'm1', undefined)).toBe(true)
+  expect([...unreachable]).toEqual([])
+})
+
+test('an unreachable prompt is drawn with a dotted tick and bar, unless being read', () => {
+  expect([tick(false), tick(true), tick(false, true), tick(true, true)]).toEqual(['─', '━', '┄', '━'])
+  expect([bar(false), bar(true), bar(false, true), bar(true, true)]).toEqual(['│', '┃', '┆', '┃'])
 })
