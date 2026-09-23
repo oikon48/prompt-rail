@@ -1,0 +1,9 @@
+{
+  "name": "turn-rail",
+  "version": "0.1.0",
+  "description": "A rail of your session's prompts beside the transcript or above the prompt; hover to read one, click to jump to it.",
+  "author": { "name": "oikon48" },
+  "homepage": "https://github.com/oikon48/turn-rail",
+  "repository": "https://github.com/oikon48/turn-rail",
+  "keywords": ["navigation", "transcript", "prompts", "function-hooks"]
+}
