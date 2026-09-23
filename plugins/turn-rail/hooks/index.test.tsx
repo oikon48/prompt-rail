@@ -116,7 +116,14 @@ test('with several prompts on screen only the topmost one stands tall', async ($
   expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeDefined()
 })
 
-const TRANSCRIPT = [
+// A transcript JSONL from rows given in order; each row's parent is the one
+// before it unless it names its own (`parentUuid`, null at a chain's root).
+const jsonl = (rows: Record<string, unknown>[]) =>
+  rows
+    .map((row, i) => JSON.stringify({ parentUuid: i === 0 ? null : rows[i - 1]?.uuid, ...row }))
+    .join('\n')
+
+const TRANSCRIPT = jsonl([
   { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first stored prompt' } },
   {
     type: 'assistant',
@@ -128,13 +135,33 @@ const TRANSCRIPT = [
   { type: 'user', uuid: 'c1', message: { role: 'user', content: '<command-name>/prompts</command-name>' } },
   { type: 'user', uuid: 'u3', message: { role: 'user', content: 'continue' } },
   { type: 'user', uuid: 'u4', message: { role: 'user', content: 'continue' } },
-]
-  .map(row => JSON.stringify(row))
-  .join('\n')
+])
+
+// alpha -> beta -> gamma, then /rewind to before beta and delta sent instead.
+const FORKED = jsonl([
+  { type: 'user', uuid: 'p1', message: { role: 'user', content: 'alpha' } },
+  { type: 'assistant', uuid: 'q1', message: { role: 'assistant', content: [{ type: 'text', text: 'alpha' }] } },
+  { type: 'user', uuid: 'p2', message: { role: 'user', content: 'beta' } },
+  { type: 'assistant', uuid: 'q2', message: { role: 'assistant', content: [{ type: 'text', text: 'beta' }] } },
+  { type: 'user', uuid: 'p3', message: { role: 'user', content: 'gamma' } },
+  { type: 'assistant', uuid: 'q3', message: { role: 'assistant', content: [{ type: 'text', text: 'gamma' }] } },
+  { type: 'user', uuid: 'p4', parentUuid: 'q1', message: { role: 'user', content: 'delta' } },
+  { type: 'assistant', uuid: 'q4', message: { role: 'assistant', content: [{ type: 'text', text: 'delta' }] } },
+  { type: 'system', uuid: 's1' },
+])
+
+// A prompt, then /compact: the boundary starts a new chain whose logical parent
+// is the last row before it.
+const COMPACTED = jsonl([
+  { type: 'user', uuid: 'p1', message: { role: 'user', content: 'before compact' } },
+  { type: 'assistant', uuid: 'q1', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  { type: 'system', uuid: 'b1', parentUuid: null, logicalParentUuid: 'q1', subtype: 'compact_boundary' },
+  { type: 'user', uuid: 'p2', message: { role: 'user', content: 'after compact' } },
+])
 
 // The world beneath the plugin for a session whose transcript is TRANSCRIPT,
 // with a store in memory the test can read.
-const world = (on: any, initial: Record<string, unknown> = {}) => {
+const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRANSCRIPT) => {
   const store = new Map<string, unknown>(Object.entries(initial))
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', ($: any, e: any) => {
@@ -146,7 +173,7 @@ const world = (on: any, initial: Record<string, unknown> = {}) => {
     store.delete(e.key)
     return {}
   })
-  on('fs.read', ($: any, e: any) => ({ value: e.path === '/t/s1.jsonl' ? TRANSCRIPT : '' }))
+  on('fs.read', ($: any, e: any) => ({ value: e.path === '/t/s1.jsonl' ? transcript : '' }))
   on('session.id', () => ({ value: 's1' }))
   on('classic.SessionStart', () => ({}))
   on('classic.Stop', () => ({}))
@@ -215,4 +242,71 @@ test('a tool row at the top of the viewport places the reader under its prompt',
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect(await band.find({ type: 'Text', text: /^#1 first stored prompt$/ })).toBeDefined()
+})
+
+test('after /rewind only the live branch is listed', async ($, on) => {
+  world(on, {}, FORKED)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['alpha', 'delta'])
+})
+
+test('a drawn row from an abandoned branch drops out once the transcript is read', async ($, on) => {
+  world(on, {}, FORKED)
+  const row = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'p2', props: prompt('beta', null) })
+  await row.unmount()
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['alpha', 'delta'])
+})
+
+test('prompts before a compaction stay listed', async ($, on) => {
+  world(on, {}, COMPACTED)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['before compact', 'after compact'])
+})
+
+test("while a subagent's transcript is in view the pane holds a note, not the rail", async ($, on) => {
+  await drawPrompts($, on)
+  const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: { ...pane('dock', 37), view: { agentId: 'ag1' } } })
+  expect(await rail.findAll({ type: 'Button' })).toEqual([])
+  expect(await rail.find({ type: 'Text', text: /main conversation/ })).toBeDefined()
+})
+
+test("while a subagent's transcript is in view the band stays empty", async ($, on) => {
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, view: { agentId: 'ag1' } } })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+})
+
+// Twelve prompts, the one at `reading` on screen, in a horizontal band ten
+// cells wide: eight bars fit between the two elision marks.
+const overflowBand = async ($: any, on: any, reading: number) => {
+  world(on, { mode: 'horizontal' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  for (let i = 0; i < 12; i++) {
+    const onScreen = i === reading ? { first: 0, last: 1, of: 2 } : null
+    await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: `p${i}`, props: prompt(`prompt ${i}`, onScreen) })
+  }
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 14 } })
+  const lower = (await band.findAll({ type: 'Button' })).map((b: any) => String(b.props.key)).filter((key: string) => /^jump-\d+$/.test(key))
+  const marks = (await band.findAll({ type: 'Text' })).map((t: any) => t.text).filter((text: string) => text === '‹' || text === '›')
+  return { lower, marks }
+}
+
+test('an overflowing horizontal rail keeps the prompt being read near the start', async ($, on) => {
+  const { lower, marks } = await overflowBand($, on, 2)
+  expect(lower).toEqual(['jump-0', 'jump-1', 'jump-2', 'jump-3', 'jump-4', 'jump-5', 'jump-6', 'jump-7'])
+  expect(marks).toEqual(['›'])
+})
+
+test('an overflowing horizontal rail centers the prompt being read', async ($, on) => {
+  const { lower, marks } = await overflowBand($, on, 6)
+  expect(lower).toEqual(['jump-2', 'jump-3', 'jump-4', 'jump-5', 'jump-6', 'jump-7', 'jump-8', 'jump-9'])
+  expect(marks).toEqual(['‹', '›'])
+})
+
+test('an overflowing horizontal rail keeps the prompt being read near the end', async ($, on) => {
+  const { lower, marks } = await overflowBand($, on, 10)
+  expect(lower).toEqual(['jump-4', 'jump-5', 'jump-6', 'jump-7', 'jump-8', 'jump-9', 'jump-10', 'jump-11'])
+  expect(marks).toEqual(['‹'])
 })

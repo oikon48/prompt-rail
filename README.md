@@ -28,13 +28,13 @@ The rail has two modes, switched with the `/prompts` command. The chosen mode is
 
 `/prompts vertical` is the default. It docks a pane beside the transcript with one row per prompt, a tick and the prompt's first line. The row of the prompt you are reading is drawn bright with a thick tick. If you drag the pane narrower than 12 columns, the rows shrink to ticks and the hovered prompt's text appears above the prompt input instead.
 
-`/prompts horizontal` closes the pane and draws the rail in the band above the prompt input, as four rows: a blank row that separates it from the transcript, two rows of upright bars, and a text line. The prompt you are reading stands two rows tall and its text is shown dimmed on the text line. Hovering a bar raises it to two rows and replaces the text line with that prompt. When there are more prompts than the row can hold, the oldest are elided behind a `‹`.
+`/prompts horizontal` closes the pane and draws the rail in the band above the prompt input, as four rows: a blank row that separates it from the transcript, two rows of upright bars, and a text line. The prompt you are reading stands two rows tall and its text is shown dimmed on the text line. Hovering a bar raises it to two rows and replaces the text line with that prompt. When there are more prompts than the row can hold, it shows a window centered on the prompt you are reading, with `‹` and `›` marking the prompts elided on either side.
 
-Running `/prompts` with no argument reopens the rail in the current mode.
+Running `/prompts` with no argument reopens the rail in the current mode. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
 
 ## How it works
 
-The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll.
+The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. It follows the chain of parent rows back from the newest one, so prompts abandoned with `/rewind` are left out. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll.
 
 ## Limitations
 
