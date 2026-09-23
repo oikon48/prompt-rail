@@ -34,7 +34,7 @@ Running `/prompts` with no argument reopens the rail in the current mode.
 
 ## How it works
 
-The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply belongs to. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll.
+The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll.
 
 ## Limitations
 
@@ -42,7 +42,7 @@ The hover text in horizontal mode and the narrow vertical rail rely on the band 
 
 The dock's width is shared by every plugin pane and remembered by Claude Code once you resize it, so the pane may open wider than the rail needs. Drag its edge to narrow it.
 
-Some known rough edges remain. A viewport whose top shows only tool calls is attributed to the next prompt, since tool rows are not tracked. A prompt whose text repeats an earlier one (for example "continue") appears only after its turn ends. A prompt that starts with `<` is listed at the end instead of in place.
+Tool calls and replies made during the current turn are mapped to their prompt when the turn ends, so while a long turn is running, a viewport showing only that turn's new tool rows keeps the previous highlight.
 
 ## Development
 

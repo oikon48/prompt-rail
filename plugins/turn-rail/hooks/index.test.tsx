@@ -118,40 +118,101 @@ test('with several prompts on screen only the topmost one stands tall', async ($
 
 const TRANSCRIPT = [
   { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first stored prompt' } },
-  { type: 'assistant', uuid: 'a1', message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } },
-  { type: 'user', uuid: 'u2', message: { role: 'user', content: 'second stored prompt' } },
+  {
+    type: 'assistant',
+    uuid: 'a1',
+    message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }, { type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+  },
+  { type: 'user', uuid: 'r1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+  { type: 'user', uuid: 'u2', message: { role: 'user', content: '<div> why does this overflow?' } },
+  { type: 'user', uuid: 'c1', message: { role: 'user', content: '<command-name>/prompts</command-name>' } },
+  { type: 'user', uuid: 'u3', message: { role: 'user', content: 'continue' } },
+  { type: 'user', uuid: 'u4', message: { role: 'user', content: 'continue' } },
 ]
   .map(row => JSON.stringify(row))
   .join('\n')
 
-const answerTranscript = (on: any) => {
-  on('fs.read', ($: any, e: any) => ({ value: e.path === '/t/s1.jsonl' ? TRANSCRIPT : '' }))
-  on('session.id', () => ({ value: 's1' }))
-  on('classic.SessionStart', () => ({}))
-}
-
-test('the session start remembers where its transcript is', async ($, on) => {
-  const store = new Map<string, unknown>()
+// The world beneath the plugin for a session whose transcript is TRANSCRIPT,
+// with a store in memory the test can read.
+const world = (on: any, initial: Record<string, unknown> = {}) => {
+  const store = new Map<string, unknown>(Object.entries(initial))
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', ($: any, e: any) => {
     store.set(e.key, e.value)
     return {}
   })
-  answerTranscript(on)
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', ($: any, e: any) => {
+    store.delete(e.key)
+    return {}
+  })
+  on('fs.read', ($: any, e: any) => ({ value: e.path === '/t/s1.jsonl' ? TRANSCRIPT : '' }))
+  on('session.id', () => ({ value: 's1' }))
+  on('classic.SessionStart', () => ({}))
+  on('classic.Stop', () => ({}))
+  on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'prompts' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({}))
+  on('ui.toast', () => {})
+  on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.text }))
+  on('ui.render', { component: 'ToolUse' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.tool }))
+  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => $.ui.resolve(e).Box({}))
+  return store
+}
+
+const railLabels = async ($: any) => {
+  const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: pane('dock', 40) })
+  return (await rail.findAll({ type: 'Button' })).map((b: any) => String(b.props.label).slice(3))
+}
+
+test('the session start remembers its transcript under its own key', async ($, on) => {
+  const store = world(on, { 'transcript:s0': { path: '/t/s0.jsonl', at: 1 } })
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  expect(store.get('transcripts')).toEqual({ s1: '/t/s1.jsonl' })
+  expect((store.get('transcript:s1') as any)?.path).toBe('/t/s1.jsonl')
+  // Another session's entry is left alone: no shared map is rewritten.
+  expect(store.get('transcript:s0')).toEqual({ path: '/t/s0.jsonl', at: 1 })
 })
 
 test('a reload lists the prompts again from the remembered transcript', async ($, on) => {
   // A reloaded module has no list; session.start fires again and rebuilds it.
-  mock.store(on, { mode: 'horizontal', transcripts: { s1: '/t/s1.jsonl' } })
-  answerTranscript(on)
-  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => $.ui.resolve(e).Box({}))
-  on('ui.close', () => ({}))
-  on('command.register', () => ({ value: { command: 'prompts' } }))
-  on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
+  world(on, { mode: 'horizontal', 'transcript:s1': { path: '/t/s1.jsonl', at: 1 } })
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  expect((await band.findAll({ type: 'Button' })).length).toBe(4)
-  expect(await band.find({ key: 'card-1' })).toBeDefined()
+  expect((await band.findAll({ type: 'Button' })).length).toBe(8)
+})
+
+test('prompts are listed in transcript order, wrappers left out, repeats kept', async ($, on) => {
+  world(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['first stored prompt', '<div> why does this overflow?', 'continue', 'continue'])
+})
+
+test('a repeated prompt gets its own entry; the provisional row is not listed', async ($, on) => {
+  world(on)
+  const draw = async (requestId: string, text: string) => {
+    const row = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId, props: prompt(text, null) })
+    await row.unmount()
+  }
+  await draw('placeholder', 'continue')
+  await draw('x1', 'continue')
+  await draw('placeholder', 'continue')
+  await draw('x2', 'continue')
+  expect(await railLabels($)).toEqual(['continue', 'continue'])
+})
+
+test('a tool row at the top of the viewport places the reader under its prompt', async ($, on) => {
+  world(on, { mode: 'horizontal' })
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.ui.mount({
+    plugin: 'turn-rail',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 't1',
+    props: { tool_use_id: 't1', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: { first: 0, last: 1, of: 2 } },
+  })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u3', props: prompt('continue', { first: 0, last: 1, of: 2 }) })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first stored prompt$/ })).toBeDefined()
 })

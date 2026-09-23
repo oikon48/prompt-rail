@@ -9,10 +9,17 @@ const RAIL_COLUMNS = 4
 // prompt beside a tick, so the band above the prompt shows it instead.
 const INLINE_REVEAL_MIN_COLUMNS = 12
 const MODE_KEY = 'mode'
-// Session id -> its transcript path, so a hot-reloaded module (whose
-// session.start carries no path) can rebuild its list. The newest few are kept.
-const TRANSCRIPTS_KEY = 'transcripts'
+// `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
+// session.start carries no path) can rebuild its list. One key per session, so
+// sessions starting together never rewrite each other's; the newest few stay.
+const TRANSCRIPT_KEY_PREFIX = 'transcript:'
 const KEPT_TRANSCRIPTS = 20
+// The id a prompt row is drawn under before its message is stored; the stored
+// row follows under its uuid.
+const PROVISIONAL_ID = 'placeholder'
+// User rows the engine writes around its own output (slash commands, bash
+// mode, reminders), which are not prompts.
+const WRAPPER = /^<(command-|local-command-|bash-|system-reminder|task-notification|user-prompt-submit-hook)/
 // onScreen reports that arrive within this many ms of each other are one pass
 // of the surface (a scroll, or a redraw), read together.
 const PASS_MS = 150
@@ -25,8 +32,6 @@ type Mode = 'vertical' | 'horizontal'
 const isMode = (value: unknown): value is Mode => value === 'vertical' || value === 'horizontal'
 
 type Entry = { id: string; text: string }
-
-const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
 
 // Terminal cells a character takes: two for East Asian wide and emoji ranges.
 const cells = (char: string) => {
@@ -67,13 +72,14 @@ const oneLine = (text: string, width: number) => {
 
 type TranscriptIndex = {
   prompts: Entry[]
-  // Assistant row uuid -> index into prompts of the prompt it answers.
+  // Reply row uuid or tool_use id -> index into prompts of the prompt it answers.
   owners: [string, number][]
 }
 
 // The person's prompts in a transcript JSONL, in order, keyed by message uuid,
-// and the prompt each assistant row answers. Tool results, meta rows,
-// sidechains and command wrappers are not prompts.
+// and the prompt each reply row and tool call answers (a tool row is drawn
+// under its tool_use id). Tool results, meta rows, sidechains and the engine's
+// wrapper rows are not prompts.
 const indexTranscript = (jsonl: string): TranscriptIndex => {
   const prompts: Entry[] = []
   const owners: [string, number][] = []
@@ -87,7 +93,13 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
     }
     if (row?.isSidechain || typeof row?.uuid !== 'string') continue
     if (row.type === 'assistant') {
-      if (prompts.length > 0) owners.push([row.uuid, prompts.length - 1])
+      if (prompts.length === 0) continue
+      const owner = prompts.length - 1
+      owners.push([row.uuid, owner])
+      const blocks = Array.isArray(row.message?.content) ? row.message.content : []
+      for (const block of blocks) {
+        if (block?.type === 'tool_use' && typeof block.id === 'string') owners.push([block.id, owner])
+      }
       continue
     }
     if (row.type !== 'user' || row.isMeta || row.isCompactSummary || row.message?.role !== 'user') continue
@@ -103,7 +115,7 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
         .join('\n')
     }
     text = text.trim()
-    if (!text || text.startsWith('<')) continue
+    if (!text || WRAPPER.test(text)) continue
     prompts.push({ id: row.uuid, text })
   }
   return { prompts, owners }
@@ -118,21 +130,26 @@ async function readTranscript($: EngineInterface, transcriptPath: string) {
   }
 }
 
-// Remember a session's transcript path, keeping only the newest few sessions.
+// Remember this session's transcript path under its own key, then drop all
+// but the newest few sessions' keys.
 async function rememberTranscript($: EngineInterface, sessionId: string, transcriptPath: string) {
-  const stored = await $.store.get(TRANSCRIPTS_KEY)
-  const known = stored && typeof stored === 'object' ? (stored as Record<string, string>) : {}
-  const rest = Object.entries(known).filter(([id]) => id !== sessionId)
-  const kept = [...rest.slice(-(KEPT_TRANSCRIPTS - 1)), [sessionId, transcriptPath] as const]
-  await $.store.set(TRANSCRIPTS_KEY, Object.fromEntries(kept))
+  await $.store.set(`${TRANSCRIPT_KEY_PREFIX}${sessionId}`, { path: transcriptPath, at: Date.now() })
+  const keys = (await $.store.keys()).filter(key => key.startsWith(TRANSCRIPT_KEY_PREFIX))
+  if (keys.length <= KEPT_TRANSCRIPTS) return
+  const dated = await Promise.all(
+    keys.map(async key => {
+      const value = (await $.store.get(key)) as { at?: unknown } | undefined
+      return { key, at: typeof value?.at === 'number' ? value.at : 0 }
+    }),
+  )
+  dated.sort((x, y) => y.at - x.at)
+  await Promise.all(dated.slice(KEPT_TRANSCRIPTS).map(({ key }) => $.store.delete(key)))
 }
 
 // The transcript path remembered for this session, if any.
 async function rememberedTranscript($: EngineInterface) {
-  const stored = await $.store.get(TRANSCRIPTS_KEY)
-  if (!stored || typeof stored !== 'object') return undefined
-  const path = (stored as Record<string, unknown>)[await $.session.id()]
-  return typeof path === 'string' ? path : undefined
+  const value = (await $.store.get(`${TRANSCRIPT_KEY_PREFIX}${await $.session.id()}`)) as { path?: unknown } | undefined
+  return typeof value?.path === 'string' ? value.path : undefined
 }
 
 export const register: Register = (on) => {
@@ -147,10 +164,10 @@ export const register: Register = (on) => {
   let lastCurrent = -1
 
   const addPrompt = (id: string, text: string) => {
-    if (entries.some(entry => entry.id === id)) return false
     // A new prompt is drawn under a provisional id before it is stored, then
-    // again under its uuid; keep the first until the transcript settles it.
-    if (entries.some(entry => normalize(entry.text) === normalize(text))) return false
+    // again under its uuid: list the stored row only, so a repeated prompt
+    // ("continue" twice) still gets an entry of its own.
+    if (id === PROVISIONAL_ID || entries.some(entry => entry.id === id)) return false
     entries = [...entries, { id, text }]
     return true
   }
@@ -232,12 +249,10 @@ export const register: Register = (on) => {
 
   // Rebuild the list from the transcript file, whose uuids are the ids the
   // transcript rows are drawn under. A resumed session so lists prompts the
-  // surface has not drawn yet, and a provisional id gives way to the stored one.
+  // surface has not drawn yet; a row drawn but not stored yet stays after them.
   const merge = (index: TranscriptIndex) => {
     const seededIds = new Set(index.prompts.map(p => p.id))
-    const seededTexts = new Set(index.prompts.map(p => normalize(p.text)))
-    const drawnOnly = entries.filter(entry => !seededIds.has(entry.id) && !seededTexts.has(normalize(entry.text)))
-    entries = [...index.prompts, ...drawnOnly]
+    entries = [...index.prompts, ...entries.filter(entry => !seededIds.has(entry.id))]
     owners = new Map(index.owners.map(([id, i]) => [id, index.prompts[i]?.id ?? '']))
   }
 
@@ -277,9 +292,24 @@ export const register: Register = (on) => {
     return next(e)
   })
 
-  // A reply on screen places the person under the prompt it answers.
+  // A reply or a tool row on screen places the person under the prompt it
+  // answers. Tool rows are drawn under their tool_use id; a collapsed group
+  // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
     if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    return next(e)
+  })
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
+    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    return next(e)
+  })
+  on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
+    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    return next(e)
+  })
+  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
+    const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
+    if (id && e.props.onScreen !== undefined && see(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
 
