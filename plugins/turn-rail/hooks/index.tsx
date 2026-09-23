@@ -348,6 +348,12 @@ export const register: Register = (on) => {
       railColumns = nextColumns
       $.ui.invalidate('ui.render')
     }
+    // The rail lists the main conversation's prompts, which a subagent's
+    // transcript does not hold, so pressing one there could not scroll to it.
+    if (e.props.view.agentId !== undefined) {
+      const hasRoom = !isRail || e.props.bodyColumns >= INLINE_REVEAL_MIN_COLUMNS
+      return <Text dimColor wrap="truncate-end">{hasRoom ? 'Prompts of the main conversation only' : '·'}</Text>
+    }
     if (entries.length === 0) {
       return <Text dimColor>{isRail ? '·' : 'No prompts yet'}</Text>
     }
@@ -393,7 +399,8 @@ export const register: Register = (on) => {
   // row of ticks with the hovered prompt beside them. Vertical with a dock too
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    if (e.props.hasSurvey || entries.length === 0) return next(e)
+    // Nothing while a survey holds the band or a subagent's transcript is in view.
+    if (e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const cards = (width: number) =>
       entries.map((entry, i) => (

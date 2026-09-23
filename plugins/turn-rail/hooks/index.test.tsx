@@ -263,3 +263,17 @@ test('prompts before a compaction stay listed', async ($, on) => {
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   expect(await railLabels($)).toEqual(['before compact', 'after compact'])
 })
+
+test("while a subagent's transcript is in view the pane holds a note, not the rail", async ($, on) => {
+  await drawPrompts($, on)
+  const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: { ...pane('dock', 37), view: { agentId: 'ag1' } } })
+  expect(await rail.findAll({ type: 'Button' })).toEqual([])
+  expect(await rail.find({ type: 'Text', text: /main conversation/ })).toBeDefined()
+})
+
+test("while a subagent's transcript is in view the band stays empty", async ($, on) => {
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, view: { agentId: 'ag1' } } })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+})
