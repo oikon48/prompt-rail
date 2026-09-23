@@ -416,16 +416,22 @@ export const register: Register = (on) => {
       // for the prompt being read and the hovered one. The text line shows the
       // prompt being read, dim, and the hovered one's card painted over it.
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
-      const first = Math.max(0, entries.length - (width - 1))
-      const shown = entries.slice(first)
       const current = currentIndex()
+      // More prompts than cells: a window of bars centered on the prompt being
+      // read (the newest when none is known), `‹` and `›` marking what it hides.
+      const isOverflowing = entries.length > width
+      const capacity = isOverflowing ? width - 2 : entries.length
+      const center = current >= 0 ? current : entries.length - 1
+      const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
+      const shown = entries.slice(first, first + capacity)
+      const hidesAfter = first + capacity < entries.length
       const label = (i: number) => `#${i + 1} ${oneLine(entries[i]?.text ?? '', width - `#${i + 1} `.length)}`
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
           <Text> </Text>
           {(['upper', 'lower'] as const).map(row => (
             <Box flexDirection="row">
-              {first > 0 ? <Text dimColor>{row === 'lower' ? '‹' : ' '}</Text> : null}
+              {isOverflowing ? <Text dimColor>{row === 'lower' && first > 0 ? '‹' : ' '}</Text> : null}
               {shown.map((entry, offset) => {
                 const i = first + offset
                 // An empty upper cell turns solid under the hover's inverse.
@@ -441,6 +447,7 @@ export const register: Register = (on) => {
                   />
                 )
               })}
+              {row === 'lower' && hidesAfter ? <Text dimColor>›</Text> : null}
             </Box>
           ))}
           <Box height={1} width={width}>
