@@ -74,24 +74,46 @@ type TranscriptIndex = {
   prompts: Entry[]
   // Reply row uuid or tool_use id -> index into prompts of the prompt it answers.
   owners: [string, number][]
+  // Every row uuid the file holds, live branch or not.
+  known: Set<string>
 }
 
-// The person's prompts in a transcript JSONL, in order, keyed by message uuid,
-// and the prompt each reply row and tool call answers (a tool row is drawn
-// under its tool_use id). Tool results, meta rows, sidechains and the engine's
-// wrapper rows are not prompts.
+// The uuids on the live branch: the chain of parents from the last row. A
+// /rewind leaves the abandoned branch in the file; a /compact boundary starts
+// a new chain whose logicalParentUuid links back to the rows before it.
+const liveBranch = (rows: any[]) => {
+  const byId = new Map<string, any>()
+  for (const row of rows) byId.set(row.uuid, row)
+  const live = new Set<string>()
+  let row = [...rows].reverse().find(candidate => !candidate.isSidechain)
+  while (row && !live.has(row.uuid)) {
+    live.add(row.uuid)
+    const parent = row.parentUuid ?? row.logicalParentUuid
+    row = typeof parent === 'string' ? byId.get(parent) : undefined
+  }
+  return live
+}
+
+// The person's prompts on the live branch of a transcript JSONL, in order,
+// keyed by message uuid, and the prompt each reply row and tool call answers
+// (a tool row is drawn under its tool_use id). Tool results, meta rows,
+// sidechains and the engine's wrapper rows are not prompts.
 const indexTranscript = (jsonl: string): TranscriptIndex => {
-  const prompts: Entry[] = []
-  const owners: [string, number][] = []
+  const rows: any[] = []
   for (const line of jsonl.split('\n')) {
     if (!line.trim()) continue
-    let row: any
     try {
-      row = JSON.parse(line)
+      const row = JSON.parse(line)
+      if (typeof row?.uuid === 'string') rows.push(row)
     } catch {
-      continue
+      // A torn last line while the engine appends; the next read has it whole.
     }
-    if (row?.isSidechain || typeof row?.uuid !== 'string') continue
+  }
+  const live = liveBranch(rows)
+  const prompts: Entry[] = []
+  const owners: [string, number][] = []
+  for (const row of rows) {
+    if (row.isSidechain || !live.has(row.uuid)) continue
     if (row.type === 'assistant') {
       if (prompts.length === 0) continue
       const owner = prompts.length - 1
@@ -118,7 +140,7 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
     if (!text || WRAPPER.test(text)) continue
     prompts.push({ id: row.uuid, text })
   }
-  return { prompts, owners }
+  return { prompts, owners, known: new Set(rows.map(row => row.uuid)) }
 }
 
 // The transcript's index, or undefined before the file exists (a fresh session).
@@ -249,10 +271,10 @@ export const register: Register = (on) => {
 
   // Rebuild the list from the transcript file, whose uuids are the ids the
   // transcript rows are drawn under. A resumed session so lists prompts the
-  // surface has not drawn yet; a row drawn but not stored yet stays after them.
+  // surface has not drawn yet; a row drawn but not stored yet stays after them,
+  // and one the file holds off the live branch (rewound away) drops out.
   const merge = (index: TranscriptIndex) => {
-    const seededIds = new Set(index.prompts.map(p => p.id))
-    entries = [...index.prompts, ...entries.filter(entry => !seededIds.has(entry.id))]
+    entries = [...index.prompts, ...entries.filter(entry => !index.known.has(entry.id))]
     owners = new Map(index.owners.map(([id, i]) => [id, index.prompts[i]?.id ?? '']))
   }
 
