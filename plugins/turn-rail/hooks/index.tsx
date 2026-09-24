@@ -107,9 +107,23 @@ export const stepFrom = (current: number, count: number, dir: 1 | -1, isSkipped:
 
 // What the transcript records of the turn a prompt started: how long it took
 // (`durationMs` as the engine reported it, else `spanMs` from the prompt to
-// the latest reply), how many tools it called, and the paths of the files it
-// edited (Edit and Write).
-export type Turn = { durationMs?: number; spanMs?: number; tools: number; files: string[] }
+// the latest reply), how many tools it called, the paths of the files it
+// edited (Edit and Write), and, unless it simply answered, how it went.
+export type Turn = { durationMs?: number; spanMs?: number; tools: number; files: string[]; outcome?: Outcome }
+// A turn still running, stopped by the person, or ended by an API error.
+type Outcome = 'running' | 'interrupted' | 'error'
+const OUTCOME_WORDS: Record<Outcome, string> = { running: 'running', interrupted: 'interrupted', error: 'API error' }
+
+// The mark beside a prompt's tick, by how its turn went, in theme colors.
+type Mark = { glyph: string; color: string }
+const MARKS: Record<Outcome | 'edited', Mark> = {
+  running: { glyph: '•', color: 'warning' },
+  interrupted: { glyph: '×', color: 'error' },
+  error: { glyph: '×', color: 'error' },
+  edited: { glyph: '•', color: 'success' },
+}
+export const markOf = (turn: Turn | undefined): Mark | undefined =>
+  turn?.outcome ? MARKS[turn.outcome] : turn && turn.files.length > 0 ? MARKS.edited : undefined
 
 // A duration as the rail shows it: `7s`, `1m 23s`, `1h 2m`.
 const duration = (ms: number) => {
@@ -141,6 +155,7 @@ export const turnLine = (turn: Turn | undefined, maxCells = Infinity) => {
   const parts: string[] = []
   const ms = turn.durationMs ?? turn.spanMs
   if (ms !== undefined) parts.push(duration(ms))
+  if (turn.outcome) parts.push(OUTCOME_WORDS[turn.outcome])
   if (turn.tools > 0) parts.push(`${turn.tools} ${turn.tools === 1 ? 'tool' : 'tools'}`)
   const names = fileNames(turn.files)
   const withFiles = (named: number) => {
@@ -217,6 +232,7 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
       if (prompts.length === 0 || !turn) continue
       const owner = prompts.length - 1
       owners.push([row.uuid, owner])
+      if (row.isApiErrorMessage === true) turn.outcome = 'error'
       const at = Date.parse(row.timestamp)
       if (Number.isFinite(at)) times[owner]!.last = at
       const blocks = Array.isArray(row.message?.content) ? row.message.content : []
@@ -235,16 +251,22 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
     if (typeof content === 'string') {
       text = content
     } else if (Array.isArray(content)) {
-      if (content.some((block: any) => block?.type === 'tool_result')) continue
       text = content
         .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
         .map((block: any) => block.text)
         .join('\n')
     }
     text = text.trim()
+    // An interruption notice ends its turn; one mid tool call rides with the
+    // call's result, so it is read before tool results are passed over.
+    if (INTERRUPTED.test(text)) {
+      if (turn) turn.outcome = 'interrupted'
+      continue
+    }
+    if (Array.isArray(content) && content.some((block: any) => block?.type === 'tool_result')) continue
     // A slash command's own row is not a prompt: the render hook skips it too,
     // so it is never drawn and could not be scrolled to.
-    if (!text || WRAPPER.test(text) || INTERRUPTED.test(text) || text.startsWith('/')) continue
+    if (!text || WRAPPER.test(text) || text.startsWith('/')) continue
     prompts.push({ id: row.uuid, text })
     turns.push({ tools: 0, files: [] })
     const at = Date.parse(row.timestamp)
@@ -325,12 +347,18 @@ export const register: Register = (on, options) => {
   // Prompt id -> how long its turns took as the engine reported them on
   // ending, for a turn whose turn_duration row the transcript lacks yet.
   const reported = new Map<string, number>()
-  // A prompt's turn as the rail shows it.
+  // Prompt id -> how its turn ended as the engine reported it, and whether the
+  // newest prompt's turn is running now.
+  const ended = new Map<string, Outcome>()
+  let isRunning = false
+  // A prompt's turn as the rail shows it: the transcript's record, completed
+  // by what the engine reported before the transcript had it.
   const turnOf = (id: string): Turn | undefined => {
     const turn = turns.get(id)
-    const ms = reported.get(id)
-    if (ms === undefined || turn?.durationMs !== undefined) return turn
-    return { tools: 0, files: [], ...turn, durationMs: ms }
+    const ms = turn?.durationMs ?? reported.get(id)
+    const outcome = isRunning && id === entries[entries.length - 1]?.id ? 'running' : (turn?.outcome ?? ended.get(id))
+    if (!turn && ms === undefined && outcome === undefined) return undefined
+    return { tools: 0, files: [], ...turn, ...(ms === undefined ? {} : { durationMs: ms }), ...(outcome ? { outcome } : {}) }
   }
   // The latest pass of onScreen reports: which transcript rows (prompts,
   // replies, tool rows) it said the viewport shows, by id. Only this pass is
@@ -478,6 +506,8 @@ export const register: Register = (on, options) => {
       owners = new Map()
       turns = new Map()
       reported.clear()
+      ended.clear()
+      isRunning = false
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
       unreachable.clear()
@@ -497,15 +527,28 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A main-loop turn starts (a subagent's run raises none): the newest
+  // prompt's turn is running.
+  on('turn.start', async ($, e, next) => {
+    isRunning = true
+    $.ui.invalidate('ui.render')
+    return next(e)
+  })
+
   // A main-loop turn ended: its prompt is the newest. The transcript's
   // turn_duration row is written after the Stop hook reads the file, so keep
-  // the engine's figure until a later read has the row.
+  // the engine's figure and how the turn ended until a later read has them.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     const entry = entries[entries.length - 1]
-    if (e.agentId === undefined && entry) {
-      reported.set(entry.id, (reported.get(entry.id) ?? 0) + e.durationMs)
-      if (turns.get(entry.id)?.durationMs === undefined) $.ui.invalidate('ui.render')
+    if (e.agentId === undefined) {
+      isRunning = false
+      if (entry) {
+        reported.set(entry.id, (reported.get(entry.id) ?? 0) + e.durationMs)
+        if (e.reason === 'aborted') ended.set(entry.id, 'interrupted')
+        if (e.reason === 'error') ended.set(entry.id, 'error')
+      }
+      $.ui.invalidate('ui.render')
     }
     return result
   })
@@ -577,15 +620,27 @@ export const register: Register = (on, options) => {
     // The surface draws such a row as `1: label`, three cells the label gives up.
     const isKeyed = (i: number) => e.props.isFocused && i < 9
     const hotkey = (i: number) => (isKeyed(i) ? { hotkey: String(i + 1) } : {})
+    // The cell before each tick marks how its turn went; it lights with the row.
+    const mark = (entry: Entry, i: number) => {
+      const found = markOf(turnOf(entry.id))
+      return (
+        <Text {...(found ? { color: found.color } : {})} hover={{ scope: `turn-rail-${i}`, inverse: true }}>
+          {found?.glyph ?? ' '}
+        </Text>
+      )
+    }
     // Docked on the terminal: one row per prompt, its tick and its text, the
     // whole row pressable. Too narrow for text, ticks alone (the band shows it).
     if (isRail) {
       const hasRoom = e.props.bodyColumns >= INLINE_REVEAL_MIN_COLUMNS
-      const width = Math.max(4, e.props.bodyColumns - 4)
+      const width = Math.max(4, e.props.bodyColumns - 5)
       return (
         <Box flexDirection="column">
           {entries.map((entry, i) => (
-            <Button
+            <Box flexDirection="row">
+              {/* A keyed tick alone fills a narrow rail: no cell for a mark. */}
+              {isKeyed(i) && !hasRoom ? null : mark(entry, i)}
+              <Button
               key={`jump-${i}`}
               plain
               {...hotkey(i)}
@@ -601,7 +656,8 @@ export const register: Register = (on, options) => {
               }
               hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
-            />
+              />
+            </Box>
           ))}
         </Box>
       )
@@ -611,14 +667,17 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         {entries.map((entry, i) => (
-          <Button
-            key={`jump-${i}`}
-            plain
-            {...hotkey(i)}
-            dimColor={i !== current}
-            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
-            onPress={() => {}}
-          />
+          <Box flexDirection="row">
+            {mark(entry, i)}
+            <Button
+              key={`jump-${i}`}
+              plain
+              {...hotkey(i)}
+              dimColor={i !== current}
+              label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
+              onPress={() => {}}
+            />
+          </Box>
         ))}
       </Box>
     )
@@ -641,8 +700,8 @@ export const register: Register = (on, options) => {
       ))
 
     if (mode === 'horizontal') {
-      // Four rows: a blank one parting the rail from the transcript, two of
-      // bars, then the text line beside the prompt. A bar stands two rows only
+      // Four rows: one of marks over the bars, which also parts the rail from
+      // the transcript, two of bars, then the text line beside the prompt. A bar stands two rows only
       // for the prompt being read and the hovered one. The text line shows the
       // prompt being read, dim, and the hovered one's card painted over it.
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
@@ -663,7 +722,13 @@ export const register: Register = (on, options) => {
       }
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
-          <Text> </Text>
+          <Box flexDirection="row">
+            {isOverflowing ? <Text> </Text> : null}
+            {shown.map(entry => {
+              const found = markOf(turnOf(entry.id))
+              return <Text {...(found ? { color: found.color } : {})}>{found?.glyph ?? ' '}</Text>
+            })}
+          </Box>
           {(['upper', 'lower'] as const).map(row => (
             <Box flexDirection="row">
               {isOverflowing ? <Text dimColor>{row === 'lower' && first > 0 ? '‹' : ' '}</Text> : null}
