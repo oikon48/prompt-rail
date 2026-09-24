@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-const PANE = 'turn-rail'
+const PANE = 'prompt-rail'
 // Rows the person typed (terminal composer, desktop/remote bridge, SDK host).
 const PROMPT_KINDS = new Set(['composer', 'bridge', 'sdk'])
 // Columns the docked rail asks for: a tick and a little air.
@@ -17,7 +17,7 @@ const LEGACY_MODE_KEY = 'mode'
 // with no /config row for plugin fields), so a module reloaded mid-session
 // starts in it again. Keyed by session, so a later session starts clean.
 const SESSION_MODE_KEY_PREFIX = 'session-mode:'
-const MODE_SETTING = 'turn-rail.mode'
+const MODE_SETTING = 'prompt-rail.mode'
 // `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
 // session.start carries no path) can rebuild its list. One key per session, so
 // sessions starting together never rewrite each other's; the newest few stay.
@@ -324,10 +324,10 @@ async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
 async function writeMode($: EngineInterface, mode: Mode) {
   try {
     const result = await $.config.set({ key: MODE_SETTING, value: mode })
-    if (result.deny) $.ui.toast(`turn-rail: the mode was not saved: ${result.deny}`)
+    if (result.deny) $.ui.toast(`prompt-rail: the mode was not saved: ${result.deny}`)
   } catch (err) {
     await $.store.set(`${SESSION_MODE_KEY_PREFIX}${await $.session.id()}`, mode)
-    $.ui.toast(`turn-rail: ${mode} for this session; the mode was not saved: ${(err as Error).message}`)
+    $.ui.toast(`prompt-rail: ${mode} for this session; the mode was not saved: ${(err as Error).message}`)
   }
 }
 
@@ -337,10 +337,10 @@ async function writeMode($: EngineInterface, mode: Mode) {
 async function jumpTo($: EngineInterface, id: string, unreachable: Set<string>) {
   try {
     const result = await $.ui.scroll({ to: { requestId: id }, block: 'start' })
-    if (result.deny) $.ui.toast(`turn-rail: ${result.deny}`)
+    if (result.deny) $.ui.toast(`prompt-rail: ${result.deny}`)
     if (noteScroll(unreachable, id, result.deny)) $.ui.invalidate('ui.render')
   } catch (err) {
-    $.ui.toast(`turn-rail: ${(err as Error).message}`)
+    $.ui.toast(`prompt-rail: ${(err as Error).message}`)
   }
 }
 
@@ -455,7 +455,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       // Named after the plugin: a plugin's commands share one namespace with
       // every other plugin's and the built-ins, so a generic name would collide.
-      name: 'turn-rail',
+      name: 'prompt-rail',
       description:
         'Show the prompt rail: vertical (a pane beside the transcript), horizontal (above the prompt) or off; next or prev jumps to the next or previous prompt.',
       argumentHint: '[off|vertical|horizontal|next|prev]',
@@ -481,33 +481,33 @@ export const register: Register = (on, options) => {
     if (index && merge(index)) $.ui.invalidate('ui.render')
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
-    // person has opened it with /turn-rail); below that it waits undrawn.
+    // person has opened it with /prompt-rail); below that it waits undrawn.
     await seatRail($, mode, isTerminal)
     return next(e)
   })
 
-  on('command.run', { command: 'turn-rail' }, async ($, e) => {
+  on('command.run', { command: 'prompt-rail' }, async ($, e) => {
     const asked = e.args.trim()
     if (asked === 'next' || asked === 'prev') {
       // The main conversation's rows are not drawn beside a subagent's, so a
       // jump would be refused and wrongly dot a prompt that can be reached.
       if (viewAgent !== undefined) {
-        $.ui.toast('turn-rail: next and prev move through the main conversation; switch back to it first')
+        $.ui.toast('prompt-rail: next and prev move through the main conversation; switch back to it first')
         return {}
       }
       const target = stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)
       const entry = entries[target]
       if (entry) await jumpTo($, entry.id, unreachable)
-      else $.ui.toast(`turn-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
+      else $.ui.toast(`prompt-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
       return {}
     }
     if (asked && !isMode(asked)) {
-      $.ui.toast('turn-rail: /turn-rail [off|vertical|horizontal|next|prev]')
+      $.ui.toast('prompt-rail: /prompt-rail [off|vertical|horizontal|next|prev]')
       return {}
     }
     // Reopening a rail that is off would only close it again: say how to turn it on.
     if (!asked && mode === 'off') {
-      $.ui.toast('turn-rail: the rail is off; /turn-rail vertical or /turn-rail horizontal turns it on')
+      $.ui.toast('prompt-rail: the rail is off; /prompt-rail vertical or /prompt-rail horizontal turns it on')
       return {}
     }
     if (isMode(asked)) mode = asked
@@ -682,7 +682,7 @@ export const register: Register = (on, options) => {
                     ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`
                     : ` ${tick(i === current, isUnreachable(i))} `
               }
-              hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
+              hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
             />
           ))}
@@ -717,7 +717,7 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const cards = (width: number) =>
       entries.map((entry, i) => (
-        <Box key={`card-${i}`} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
+        <Box key={`card-${i}`} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
           <Text dimColor>{`#${i + 1} `}</Text>
           <Text wrap="truncate-end">{withTurn(entry, width)}</Text>
         </Box>
@@ -749,7 +749,7 @@ export const register: Register = (on, options) => {
             {/* With no prompt known on screen, the newest: an empty line reads as a broken rail. */}
             <Text dimColor wrap="truncate-end">{label(center)}</Text>
             {entries.map((_, i) => (
-              <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
+              <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
                 <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
               </Box>
             ))}
@@ -764,7 +764,7 @@ export const register: Register = (on, options) => {
                   plain
                   dimColor={i !== current}
                   label={bar(i === current, isUnreachable(i))}
-                  hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
+                  hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
                   onPress={() => {}}
                 />
               )
@@ -784,9 +784,9 @@ export const register: Register = (on, options) => {
   // The band holds the keyboard after a click or ctrl+x tab, and a ring on a
   // bar stays lit until Escape, which reads as a hover that will not clear.
   // Keep the ring off the horizontal rail's bars; a click still presses, and
-  // /turn-rail next and prev are its keyboard route.
-  on('ui.focus', { component: 'AbovePrompt', plugin: 'turn-rail' }, async ($, e, next) => {
-    if (mode === 'horizontal') return { deny: 'turn-rail: the rail takes clicks, not the focus ring' }
+  // /prompt-rail next and prev are its keyboard route.
+  on('ui.focus', { component: 'AbovePrompt', plugin: 'prompt-rail' }, async ($, e, next) => {
+    if (mode === 'horizontal') return { deny: 'prompt-rail: the rail takes clicks, not the focus ring' }
     return next(e)
   })
 
@@ -794,12 +794,12 @@ export const register: Register = (on, options) => {
   // read as two highlights. Keep the ring off the rows; the digits still jump
   // while the pane holds the keyboard, and the engine's own stops (the close
   // mark, the tabs) carry no plugin, so the matcher leaves them be.
-  on('ui.focus', { component: 'Pane', requestId: PANE, plugin: 'turn-rail' }, async () => ({
-    deny: 'turn-rail: the rail takes clicks and digits, not the focus ring',
+  on('ui.focus', { component: 'Pane', requestId: PANE, plugin: 'prompt-rail' }, async () => ({
+    deny: 'prompt-rail: the rail takes clicks and digits, not the focus ring',
   }))
 
   // Scroll from the press dispatch itself (a click or a hotkey).
-  on('ui.press', { plugin: 'turn-rail' }, async ($, e, next) => {
+  on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
     const entry = entries[index]
     if (entry) await jumpTo($, entry.id, unreachable)

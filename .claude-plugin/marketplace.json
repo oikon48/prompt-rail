@@ -4,11 +4,11 @@
   "metadata": { "description": "oikon48's Claude Code plugins and mods" },
   "plugins": [
     {
-      "name": "turn-rail",
-      "source": "./plugins/turn-rail",
+      "name": "prompt-rail",
+      "source": "./plugins/prompt-rail",
       "description": "A rail of your session's prompts beside the transcript or above the prompt; hover to read one, click to jump to it.",
-      "homepage": "https://github.com/oikon48/turn-rail",
-      "repository": "https://github.com/oikon48/turn-rail"
+      "homepage": "https://github.com/oikon48/prompt-rail",
+      "repository": "https://github.com/oikon48/prompt-rail"
     }
   ]
 }
