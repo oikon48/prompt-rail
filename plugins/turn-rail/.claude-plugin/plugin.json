@@ -7,6 +7,7 @@
   },
   "homepage": "https://github.com/oikon48/turn-rail",
   "repository": "https://github.com/oikon48/turn-rail",
+  "license": "MIT",
   "keywords": [
     "navigation",
     "transcript",
