@@ -246,6 +246,7 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
   })
   on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.text }))
   on('ui.render', { component: 'ToolUse' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.tool }))
+  on('ui.render', { component: 'AssistantMessage' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: 'reply' }))
   on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => $.ui.resolve(e).Box({}))
   return store
 }
@@ -828,4 +829,48 @@ test('the horizontal band needs no status line', async ($, on) => {
   expect(disk.status.at(-1)).toBe('#–/4')
   await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   expect(disk.status.at(-1)).toBeUndefined()
+})
+
+test('a reply the transcript read has not seen yet counts as the newest prompt\'s', async ($, on) => {
+  world(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  // The Stop hook read the file before the turn's last reply was written, so
+  // the index does not know this row; only the newest turn can own it.
+  await $.ui.mount({
+    plugin: 'turn-rail',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    requestId: 'late-reply',
+    props: { text: 'done', onScreen: { first: 0, last: 1, of: 2 } },
+  })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#4 continue$/ })).toBeDefined()
+})
+
+test('a prompt still drawn under its provisional id places no one', async ($, on) => {
+  world(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u1', props: prompt('first stored prompt', { first: 0, last: 1, of: 2 }) })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'placeholder', props: prompt('fifth', { first: 0, last: 1, of: 2 }) })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first stored prompt$/ })).toBeDefined()
+})
+
+test('a new prompt\'s turn marks that prompt, not the one before it', async ($, on) => {
+  world(on, {}, jsonl([{ type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } }]))
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  // The turn for "second" starts before its row is stored under its uuid.
+  await $.turn.start({ text: 'second', turnId: 't2' })
+  expect(await paneMarks($)).toEqual([[' ', undefined]])
+  const row = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u2', props: prompt('second', null) })
+  await row.unmount()
+  expect(await paneMarks($)).toEqual([[' ', undefined], ['•', 'warning']])
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't2', reason: 'answer' })
+  // A continuation (no typed text) runs under the newest prompt at once.
+  await $.turn.start({ text: '', turnId: 't3' })
+  expect(await paneMarks($)).toEqual([[' ', undefined], ['•', 'warning']])
 })

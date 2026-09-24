@@ -358,12 +358,21 @@ export const register: Register = (on, options) => {
   // newest prompt's turn is running now.
   const ended = new Map<string, Outcome>()
   let isRunning = false
+  // The running turn's typed text, and how many prompts were listed when it
+  // started: a new prompt's turn starts before its row is stored, so until
+  // that row is listed the newest entry is the prompt before it.
+  let running = { text: '', listedAtStart: 0 }
+  const isRunningFor = (id: string) => {
+    const newest = entries[entries.length - 1]
+    if (!isRunning || newest?.id !== id) return false
+    return running.text === '' || newest.text.trim() === running.text || entries.length > running.listedAtStart
+  }
   // A prompt's turn as the rail shows it: the transcript's record, completed
   // by what the engine reported before the transcript had it.
   const turnOf = (id: string): Turn | undefined => {
     const turn = turns.get(id)
     const ms = turn?.durationMs ?? reported.get(id)
-    const outcome = isRunning && id === entries[entries.length - 1]?.id ? 'running' : (turn?.outcome ?? ended.get(id))
+    const outcome = isRunningFor(id) ? 'running' : (turn?.outcome ?? ended.get(id))
     if (!turn && ms === undefined && outcome === undefined) return undefined
     return { tools: 0, files: [], ...turn, ...(ms === undefined ? {} : { durationMs: ms }), ...(outcome ? { outcome } : {}) }
   }
@@ -401,9 +410,12 @@ export const register: Register = (on, options) => {
     const promptIndex = new Map(entries.map((entry, i) => [entry.id, i]))
     let best = -1
     for (const [id, isShown] of pass.rows) {
-      if (!isShown) continue
+      if (!isShown || id === PROVISIONAL_ID) continue
       const ownerId = owners.get(id)
-      const i = promptIndex.get(id) ?? (ownerId === undefined ? undefined : promptIndex.get(ownerId))
+      // A reply or tool row the transcript read does not know was written
+      // after it: the Stop hook reads before the turn's last reply is stored,
+      // and a running turn's rows come later still. Only the newest turn owns it.
+      const i = promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
       if (i !== undefined && (best < 0 || i < best)) best = i
     }
     if (best >= 0) lastCurrent = best
@@ -566,6 +578,7 @@ export const register: Register = (on, options) => {
   // prompt's turn is running.
   on('turn.start', async ($, e, next) => {
     isRunning = true
+    running = { text: e.text.trim(), listedAtStart: entries.length }
     $.ui.invalidate('ui.render')
     return next(e)
   })
