@@ -15,22 +15,18 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
 
 ## Quick start
 
-1. Turn on function hooks (early access, Claude Code 2.1.280 or newer) by adding the flag to `~/.claude/settings.json`:
+1. Turn on function hooks (early access, Claude Code 2.1.280+) in `~/.claude/settings.json`:
 
    ```json
-   {
-     "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" }
-   }
+   { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
    ```
 
-2. Add the marketplace and install the plugin, from your shell:
+2. Install, from your shell or inside a session:
 
    ```bash
    claude plugin marketplace add oikon48/prompt-rail
    claude plugin install prompt-rail@oikon48
    ```
-
-   or from inside a Claude Code session:
 
    ```
    /plugin marketplace add oikon48/prompt-rail
@@ -39,95 +35,78 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
 
 3. Start a new session. The rail opens on its own.
 
-Clicking and hovering work best in the fullscreen terminal layout (`"tui": "fullscreen"` in the same file), where the terminal reports the mouse. While this repository is private, adding the marketplace needs git access to it, through an SSH key or `gh auth login`.
+Mouse works best with `"tui": "fullscreen"`. While the repository is private, adding the marketplace needs git access to it.
 
-## Why
+## Two layouts
 
-Long Claude Code sessions bury your own prompts under replies, diffs and tool output. Scrolling back to find "the prompt where I asked for the tests" means reading the whole transcript again. prompt-rail keeps one tick per prompt on screen, shows what each one asked and what its turn did, and scrolls the transcript straight to it when you click.
+### Horizontal, above the prompt
 
-## Features
+<img src="docs/horizontal.png" alt="The horizontal rail: a text line with the hovered prompt and its turn summary over a row of bars" width="800">
 
-- One click jumps the transcript to any earlier prompt, and the rail lists every prompt of the session, including those from before a resume.
-- Hovering a bar of the horizontal rail shows the prompt with a summary of its turn, such as `#3 fix the overflow · 1m 23s · 4 tools · app.ts, README.md`.
-- The tick of the prompt you are reading stands out and follows you as you scroll.
-- Two layouts: a docked pane beside the transcript, or a compact bar above the prompt input. Either can be turned off.
-- It follows the live branch of the conversation, so prompts abandoned with `/rewind` drop out of the rail.
-- `/prompt-rail next` and `/prompt-rail prev` step through prompts from the keyboard, even while a turn is streaming.
+### Vertical, beside the transcript (default)
 
-## Usage
+<img src="docs/vertical.png" alt="The vertical rail: one row per prompt in a pane beside the transcript, the prompt being read marked with a thick tick" width="480">
 
-### Layouts
+## Commands
 
-The rail has two layouts, and you can also turn it off. All three are one setting, "Rail mode", which `/config` lists as a single row that opens a picker. The `/prompt-rail` commands below write the same setting, the change applies at once, and it is kept for later sessions under `pluginConfigs` in `~/.claude/settings.json`.
-
-Horizontal draws the rail in the band above the prompt input, as a text line over a row of bars, one bar per prompt. The bar of the prompt you are reading is thick, and its text is shown dimmed on the text line. Hovering a bar replaces the text line with that prompt and its turn summary. When there are more prompts than the row can hold, it shows a window around the prompt you are reading, with `‹` and `›` marking the prompts on either side.
-
-Vertical, the default, docks a pane beside the transcript with one row per prompt: a tick and the prompt's first line. The row of the prompt you are reading is bright, with a thick tick. On a terminal too narrow to seat the pane, it waits until there is room, and the horizontal layout is the one to use there.
-
-Off closes the pane and leaves the band above the prompt input empty until you pick a layout again.
-
-### Commands
-
-| Command | What it does |
+| Command | |
 | --- | --- |
-| `/prompt-rail` | Reopens the rail in the current layout. While the rail is off, it says how to turn it on. |
-| `/prompt-rail horizontal` | Shows the rail as bars above the prompt input. |
-| `/prompt-rail vertical` | Shows the rail as a pane beside the transcript. |
-| `/prompt-rail off` | Hides the rail. |
-| `/prompt-rail next` | Scrolls to the prompt after the one you are reading. |
-| `/prompt-rail prev` | Scrolls to the prompt before the one you are reading. |
+| `/prompt-rail horizontal` | Bars above the prompt input |
+| `/prompt-rail vertical` | A pane beside the transcript |
+| `/prompt-rail off` | Hide the rail |
+| `/prompt-rail next` | Jump to the next prompt |
+| `/prompt-rail prev` | Jump to the previous prompt |
+| `/prompt-rail` | Reopen the rail in the current layout |
 
-### Keyboard
+The layout is also the "Rail mode" row in `/config`, and it is kept across sessions. In the vertical pane, ctrl+x tab and a digit `1` to `9` jump to that prompt.
 
-Claude Code does not let a plugin define keybindings of its own, so the keyboard routes are the `next` and `prev` commands and the pane's digits. While the vertical pane has the keyboard (ctrl+x tab, or Tab onto it), its first nine rows show `1:` to `9:`, and pressing a digit jumps to that prompt. Esc gives the keyboard back to the prompt input.
+## Tick legend
 
-### Reading the ticks
-
-A prompt whose jump Claude Code refused, because its row is not drawn in the transcript, gets a dotted tick (`┄`, or `┆` in the horizontal rail) from then on, and `next` and `prev` pass over it. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
+| Tick | Meaning |
+| --- | --- |
+| `━` `┃` | The prompt you are reading |
+| `─` `│` | Any other prompt |
+| `┄` `┆` | A prompt Claude Code refused to scroll to; `next` and `prev` skip it |
 
 ## How it works
 
 <details>
-<summary>How the rail knows your prompts and where you are</summary>
+<summary>From the transcript file to the rail</summary>
 
-The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. It follows the chain of parent rows back from the newest one, so prompts abandoned with `/rewind` are left out.
+```mermaid
+flowchart LR
+  T[transcript .jsonl] -->|every prompt on the live branch| R[rail]
+  S[rows on screen] -->|topmost row's prompt| R
+  R -->|click, digit, next/prev| J[scroll that prompt's row into view]
+```
 
-Transcript rows are drawn under their transcript uuid, so a click asks Claude Code to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports that Claude Code sends while you scroll. A reply or tool row that the transcript did not hold yet when it was last read, such as one from the turn still running, counts as the newest prompt's.
-
-The rail asks for a redraw only when the list or the prompt you are reading changes. When a turn ends, it reads the transcript again only if the file's size or modification time changed. It never writes to the status line, which stays yours.
+The rail lists the prompts of the live branch, so prompts abandoned with `/rewind` drop out, and prompts from before a resume are listed too. The prompt you are reading owns the topmost row on screen. The transcript is read again only when its size or time changed.
 
 </details>
 
 ## Limitations
 
-prompt-rail is built on function hooks, which are early access. The hook API may change between Claude Code releases, so treat the plugin as experimental.
+<details>
+<summary>Known limits</summary>
 
-The hover text of the horizontal rail relies on the band above the prompt, which only the terminal draws. In the Claude desktop app the plugin shows the vertical list with each prompt's text, and that path has not been checked there yet. Desktop sessions have no `/config` row for plugin settings, so `/prompt-rail horizontal`, `vertical` and `off` apply to the current session only there, and a notice says the mode was not saved.
+- Function hooks are early access, and their API may change between Claude Code releases.
+- The hover card with the turn summary is part of the horizontal rail; the terminal alone draws it.
+- In the Claude desktop app the rail is a vertical list, not yet checked there, and a layout command lasts for the session only.
+- The dock width is shared by all plugin panes; drag its edge to narrow it, down to 24 columns.
+- A `/compact` command's own row cannot be jumped to; its tick turns dotted after the first try.
+- Near the end of the transcript, `next` cannot scroll further, and the digits cover the first nine prompts.
 
-Claude Code shares one dock width among all plugin panes and remembers it once you resize it, so the pane may open wider than the rail needs. Drag its edge to narrow it, down to Claude Code's minimum of 24 columns.
-
-Prompts sent before a `/compact` stay in the transcript and can still be jumped to. A row the rail lists but the transcript does not draw, such as the `/compact` command's own row right after a compaction, cannot be. The rail learns this only when a click on it is refused, so the tick turns dotted after the first try, and `/clear` forgets it.
-
-Near the end of the transcript, the last prompts may already be in view below the top row. The transcript cannot scroll further, so `/prompt-rail next` stays put and the thick tick keeps marking the prompt at the top. The digit hotkeys cover the first nine prompts only.
-
-The turn summary is part of the horizontal rail's hover card. The vertical pane draws each prompt's text in its row and has no card. A turn still running has no duration yet, and its tool count and files catch up when the turn ends.
+</details>
 
 ## Development
 
-Load the plugin from this checkout for one session. Saving a file reloads the hooks module in a running interactive session.
-
 ```bash
-claude --plugin-dir plugins/prompt-rail
-```
-
-Generate type declarations for your Claude Code build into `.claude/types` (ignored by git) by running `/plugin-types .claude/types` inside a session opened in this repository. The `tsconfig.json` here picks them up.
-
-```bash
+claude --plugin-dir plugins/prompt-rail        # load this checkout; saving reloads it
 claude plugin validate plugins/prompt-rail
 claude plugin test plugins/prompt-rail
 ```
 
-Installed copies update only when the version in `plugins/prompt-rail/.claude-plugin/plugin.json` changes, so bump it with each release.
+Run `/plugin-types .claude/types` in a session here for type declarations. Bump the version in `plugins/prompt-rail/.claude-plugin/plugin.json` with each release, since installed copies update only when it changes.
 
 ## License
 
