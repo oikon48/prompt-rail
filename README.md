@@ -44,7 +44,7 @@ Running `/turn-rail` with no argument reopens the rail in the current mode. Whil
 
 ## How it works
 
-The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. It follows the chain of parent rows back from the newest one, so prompts abandoned with `/rewind` are left out. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll. The rail asks for a redraw only when the list or the prompt you are reading changes, and when a turn ends it reads the transcript again only if the file's size or modification time changed.
+The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. It follows the chain of parent rows back from the newest one, so prompts abandoned with `/rewind` are left out. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll. A reply or tool row that the transcript did not hold yet when it was last read, such as one from the turn still running or the last reply of a turn that just ended, counts as the newest prompt's. The rail asks for a redraw only when the list or the prompt you are reading changes, and when a turn ends it reads the transcript again only if the file's size or modification time changed.
 
 ## Limitations
 
@@ -57,8 +57,6 @@ Prompts sent before a `/compact` stay drawn in the transcript and can still be j
 Near the end of the transcript the last prompts may already be in view below the top row. The transcript cannot scroll any further, so `/turn-rail next` stays where it is and the thick tick keeps marking the prompt at the top. The digit hotkeys cover the first nine prompts of the list only.
 
 The turn summary is part of the hover card, so it shows in horizontal mode and on the narrow vertical rail. The wide vertical rail and the desktop list draw the prompt's text in the row itself and have no card. A turn still running has no duration yet, and its tool count and files catch up when the turn ends.
-
-Tool calls and replies made during the current turn are mapped to their prompt when the turn ends, so while a long turn is running, a viewport showing only that turn's new tool rows keeps the previous highlight.
 
 ## Development
 
