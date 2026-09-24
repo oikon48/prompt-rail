@@ -23,11 +23,18 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
    }
    ```
 
-2. Add the marketplace and install the plugin:
+2. Add the marketplace and install the plugin, from your shell:
 
    ```bash
    claude plugin marketplace add oikon48/turn-rail
    claude plugin install turn-rail@oikon48
+   ```
+
+   or from inside a Claude Code session:
+
+   ```
+   /plugin marketplace add oikon48/turn-rail
+   /plugin install turn-rail@oikon48
    ```
 
 3. Start a new session. The rail opens on its own.
