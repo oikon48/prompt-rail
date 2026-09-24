@@ -102,7 +102,7 @@ The rail asks for a redraw only when the list or the prompt you are reading chan
 
 turn-rail is built on function hooks, which are early access. The hook API may change between Claude Code releases, so treat the plugin as experimental.
 
-The hover text of the horizontal rail relies on the band above the prompt, which only the terminal draws. In the Claude desktop app the plugin shows the vertical list with each prompt's text, and that path has not been checked there yet.
+The hover text of the horizontal rail relies on the band above the prompt, which only the terminal draws. In the Claude desktop app the plugin shows the vertical list with each prompt's text, and that path has not been checked there yet. Desktop sessions have no `/config` row for plugin settings, so `/turn-rail horizontal`, `vertical` and `off` apply to the current session only there, and a notice says the mode was not saved.
 
 Claude Code shares one dock width among all plugin panes and remembers it once you resize it, so the pane may open wider than the rail needs. Drag its edge to narrow it, down to Claude Code's minimum of 24 columns.
 
