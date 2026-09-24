@@ -404,12 +404,12 @@ test('an unchanged transcript is not read again when a turn ends', async ($, on)
   world(on, {}, TRANSCRIPT, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   expect(disk.reads).toBe(1)
-  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
   expect(disk.reads).toBe(1)
   // A turn that wrote to it is read.
   disk.transcript = `${TRANSCRIPT}\n${JSON.stringify({ type: 'user', uuid: 'u5', parentUuid: 'u4', message: { role: 'user', content: 'fifth' } })}`
   disk.mtimeMs = 2
-  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
   expect(disk.reads).toBe(2)
   expect(await railLabels($)).toEqual(['first stored prompt', '<div> why does this overflow?', 'continue', 'continue', 'fifth'])
 })
@@ -423,7 +423,7 @@ test('a turn that changes neither the list nor the prompt being read redraws not
   // Same list, rewritten on disk (a row the index skips was appended).
   disk.transcript = `${TRANSCRIPT}\n${JSON.stringify({ type: 'system', uuid: 's9', parentUuid: 'u4', subtype: 'turn_duration' })}`
   disk.mtimeMs = 2
-  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
   expect(disk.reads).toBe(2)
   expect(disk.invalidations).toBe(before)
 })
@@ -623,7 +623,7 @@ test('a turn that ends redraws, so its card carries the new details', async ($, 
   const before = disk.invalidations
   disk.transcript = jsonl([first, { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 4000 }])
   disk.mtimeMs = 2
-  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
   expect(disk.invalidations).toBe(before + 1)
 })
 
