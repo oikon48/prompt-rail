@@ -314,9 +314,16 @@ async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
 }
 
 // Write the mode setting, as a change in /config would; say so if refused.
+// A session with no /config row for plugin fields (the desktop app's SDK
+// sessions) throws instead of denying, and the mode then holds for this
+// session only.
 async function writeMode($: EngineInterface, mode: Mode) {
-  const result = await $.config.set({ key: MODE_SETTING, value: mode })
-  if (result.deny) $.ui.toast(`turn-rail: the mode was not saved: ${result.deny}`)
+  try {
+    const result = await $.config.set({ key: MODE_SETTING, value: mode })
+    if (result.deny) $.ui.toast(`turn-rail: the mode was not saved: ${result.deny}`)
+  } catch (err) {
+    $.ui.toast(`turn-rail: ${mode} for this session; the mode was not saved: ${(err as Error).message}`)
+  }
 }
 
 // Scroll the transcript to a prompt's row, from a dispatch that answers the

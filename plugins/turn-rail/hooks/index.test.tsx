@@ -533,6 +533,32 @@ test('/turn-rail <mode> writes the mode setting and switches at once', async ($,
   expect(disk.panes.at(-1)).toBe('open turn-rail')
 })
 
+// A session with no /config row for the plugin's fields (the desktop app's
+// SDK sessions) makes $.config.set throw rather than deny.
+test('/turn-rail <mode> still switches when the setting has no /config row', async ($, on) => {
+  const toasts: string[] = []
+  on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  mock.store(on)
+  on('config.set', () => {
+    throw new Error('$.config.set: no /config row with key turn-rail.mode ($.config.list names them)')
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({}))
+  on('ui.toast', ($: any, e: any) => {
+    toasts.push(e.text)
+  })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', { first: 0, last: 1, of: 2 }) })
+  const answer = await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  expect(answer).toBeDefined()
+  // The mode applies to this session even though it could not be kept.
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.findAll({ type: 'Button' })).length).toBe(1)
+  expect(toasts.at(-1)).toMatch(/not saved/)
+})
+
 test('the mode no longer lives in the store: an earlier version\'s moves to the setting', async ($, on) => {
   const disk = beneath()
   const store = world(on, { mode: 'horizontal' }, TRANSCRIPT, disk)
