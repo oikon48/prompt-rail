@@ -542,6 +542,7 @@ test('/turn-rail <mode> still switches when the setting has no /config row', asy
     return <Text>{e.props.text}</Text>
   })
   mock.store(on)
+  on('session.id', () => ({ value: 's1' }))
   on('config.set', () => {
     throw new Error('$.config.set: no /config row with key turn-rail.mode ($.config.list names them)')
   })
@@ -557,6 +558,35 @@ test('/turn-rail <mode> still switches when the setting has no /config row', asy
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect((await band.findAll({ type: 'Button' })).length).toBe(1)
   expect(toasts.at(-1)).toMatch(/not saved/)
+})
+
+// A module reloaded mid-session starts again from the setting; a mode the
+// setting could not keep is kept for the session under its id instead.
+test('a mode kept for the session only survives a reload of the module', async ($, on) => {
+  const disk = beneath()
+  world(on, { 'session-mode:s1': 'off' }, TRANSCRIPT, disk)
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.panes).toEqual(['close turn-rail'])
+})
+
+test('a mode the setting cannot keep is kept for the session', async ($, on) => {
+  const store = new Map<string, unknown>()
+  on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', ($: any, e: any) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 's1' }))
+  on('config.set', () => {
+    throw new Error('$.config.set: no /config row with key turn-rail.mode')
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => {})
+  await $.command.run({ command: 'turn-rail', args: 'off' })
+  expect(store.get('session-mode:s1')).toBe('off')
 })
 
 test('the mode no longer lives in the store: an earlier version\'s moves to the setting', async ($, on) => {

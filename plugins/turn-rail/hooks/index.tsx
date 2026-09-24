@@ -13,6 +13,10 @@ const MIN_CARD_TEXT = 12
 // The mode is the plugin's `mode` setting (userConfig), a row in /config. An
 // earlier version kept it in the store under this key, shared by every session.
 const LEGACY_MODE_KEY = 'mode'
+// `session-mode:<session id>` -> a mode the setting could not keep (a session
+// with no /config row for plugin fields), so a module reloaded mid-session
+// starts in it again. Keyed by session, so a later session starts clean.
+const SESSION_MODE_KEY_PREFIX = 'session-mode:'
 const MODE_SETTING = 'turn-rail.mode'
 // `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
 // session.start carries no path) can rebuild its list. One key per session, so
@@ -322,6 +326,7 @@ async function writeMode($: EngineInterface, mode: Mode) {
     const result = await $.config.set({ key: MODE_SETTING, value: mode })
     if (result.deny) $.ui.toast(`turn-rail: the mode was not saved: ${result.deny}`)
   } catch (err) {
+    await $.store.set(`${SESSION_MODE_KEY_PREFIX}${await $.session.id()}`, mode)
     $.ui.toast(`turn-rail: ${mode} for this session; the mode was not saved: ${(err as Error).message}`)
   }
 }
@@ -466,6 +471,9 @@ export const register: Register = (on, options) => {
       mode = stored
       await writeMode($, mode)
     }
+    // A mode kept for this session only outlives a reload of this module.
+    const kept = await $.store.get(`${SESSION_MODE_KEY_PREFIX}${await $.session.id()}`)
+    if (isMode(kept)) mode = kept
     // Also fired after a hot reload, when the list starts empty: rebuild it from
     // the transcript this session's classic SessionStart remembered.
     const transcriptPath = await rememberedTranscript($)
