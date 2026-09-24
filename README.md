@@ -32,6 +32,8 @@ The rail has two modes. The mode is the plugin's "Rail mode" setting, which `/co
 
 A prompt whose click the engine refused because its row is not drawn in the transcript gets a dotted tick (`┄`, or `┆` in the horizontal rail) from then on, so you can tell it apart before clicking it again.
 
+`/prompts next` and `/prompts prev` scroll the transcript to the prompt after or before the one you are reading, passing over prompts with a dotted tick. They run at once even while a turn is streaming. While the vertical pane has the keyboard (ctrl+x tab, or Tab onto it), its first nine rows show `1:` to `9:` in front of the tick, and pressing that digit jumps to the prompt. Esc gives the keyboard back to the prompt input. Claude Code does not let a plugin define keybindings of its own, so these commands and the pane's digits are the keyboard routes.
+
 Running `/prompts` with no argument reopens the rail in the current mode. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
 
 ## How it works
@@ -45,6 +47,8 @@ The hover text in horizontal mode and the narrow vertical rail rely on the band 
 The dock's width is shared by every plugin pane and remembered by Claude Code once you resize it, so the pane may open wider than the rail needs. Drag its edge to narrow it.
 
 Prompts sent before a `/compact` stay drawn in the transcript and can still be jumped to. A row the rail lists but the transcript does not draw, such as the `/compact` command's own row that shows up in the list right after a compaction, cannot be. The rail only learns this when a click on it is refused, so the tick turns dotted after the first try, and `/clear` forgets it.
+
+Near the end of the transcript the last prompts may already be in view below the top row. The transcript cannot scroll any further, so `/prompts next` stays where it is and the thick tick keeps marking the prompt at the top. The digit hotkeys cover the first nine prompts of the list only.
 
 Tool calls and replies made during the current turn are mapped to their prompt when the turn ends, so while a long turn is running, a viewport showing only that turn's new tool rows keeps the previous highlight.
 

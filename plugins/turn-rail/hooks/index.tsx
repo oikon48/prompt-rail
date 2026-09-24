@@ -92,6 +92,15 @@ export const noteScroll = (unreachable: Set<string>, id: string, deny: string | 
   return unreachable.has(id) !== was
 }
 
+// The prompt one step from `current` in direction `dir`, passing over those
+// `isSkipped` names; from an unknown place (-1), the first or the last. -1
+// when there is none that way.
+export const stepFrom = (current: number, count: number, dir: 1 | -1, isSkipped: (i: number) => boolean) => {
+  let i = current >= 0 ? current + dir : dir > 0 ? 0 : count - 1
+  for (; i >= 0 && i < count; i += dir) if (!isSkipped(i)) return i
+  return -1
+}
+
 type TranscriptIndex = {
   prompts: Entry[]
   // Reply row uuid or tool_use id -> index into prompts of the prompt it answers.
@@ -205,6 +214,19 @@ async function writeMode($: EngineInterface, mode: Mode) {
   if (result.deny) $.ui.toast(`turn-rail: the mode was not saved: ${result.deny}`)
 }
 
+// Scroll the transcript to a prompt's row, from a dispatch that answers the
+// person's own input (a press, a typed command): a transcript row moves only
+// then. Records whether the row could be reached.
+async function jumpTo($: EngineInterface, id: string, unreachable: Set<string>) {
+  try {
+    const result = await $.ui.scroll({ to: { requestId: id }, block: 'start' })
+    if (result.deny) $.ui.toast(`turn-rail: ${result.deny}`)
+    if (noteScroll(unreachable, id, result.deny)) $.ui.invalidate('ui.render')
+  } catch (err) {
+    $.ui.toast(`turn-rail: ${(err as Error).message}`)
+  }
+}
+
 // The transcript path remembered for this session, if any.
 async function rememberedTranscript($: EngineInterface) {
   const value = (await $.store.get(`${TRANSCRIPT_KEY_PREFIX}${await $.session.id()}`)) as { path?: unknown } | undefined
@@ -277,8 +299,11 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'prompts',
-      description: 'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt).',
-      argumentHint: '[vertical|horizontal]',
+      description:
+        'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt); next or prev jumps to the next or previous prompt.',
+      argumentHint: '[vertical|horizontal|next|prev]',
+      // Runs while a turn streams, so next and prev move through it then too.
+      immediate: true,
     })
     isTerminal = e.surface === 'terminal'
     // Move a mode an earlier version stored into the setting, once. Writing
@@ -303,8 +328,15 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'prompts' }, async ($, e) => {
     const asked = e.args.trim()
+    if (asked === 'next' || asked === 'prev') {
+      const target = stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)
+      const entry = entries[target]
+      if (entry) await jumpTo($, entry.id, unreachable)
+      else $.ui.toast(`turn-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
+      return {}
+    }
     if (asked && !isMode(asked)) {
-      $.ui.toast('turn-rail: /prompts [vertical|horizontal]')
+      $.ui.toast('turn-rail: /prompts [vertical|horizontal|next|prev]')
       return {}
     }
     if (isMode(asked)) mode = asked
@@ -408,6 +440,10 @@ export const register: Register = (on, options) => {
       return <Text dimColor>{isRail ? '·' : 'No prompts yet'}</Text>
     }
     const current = currentIndex()
+    // While the pane holds the keyboard, 1 to 9 jump to the first nine prompts.
+    // The surface draws such a row as `1: label`, three cells the label gives up.
+    const isKeyed = (i: number) => e.props.isFocused && i < 9
+    const hotkey = (i: number) => (isKeyed(i) ? { hotkey: String(i + 1) } : {})
     // Docked on the terminal: one row per prompt, its tick and its text, the
     // whole row pressable. Too narrow for text, ticks alone (the band shows it).
     if (isRail) {
@@ -419,8 +455,17 @@ export const register: Register = (on, options) => {
             <Button
               key={`jump-${i}`}
               plain
+              {...hotkey(i)}
               dimColor={i !== current}
-              label={hasRoom ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}` : ` ${tick(i === current, isUnreachable(i))} `}
+              label={
+                isKeyed(i)
+                  ? hasRoom
+                    ? `${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width - 2)}`
+                    : tick(i === current, isUnreachable(i))
+                  : hasRoom
+                    ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`
+                    : ` ${tick(i === current, isUnreachable(i))} `
+              }
               hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
             />
@@ -436,8 +481,9 @@ export const register: Register = (on, options) => {
           <Button
             key={`jump-${i}`}
             plain
+            {...hotkey(i)}
             dimColor={i !== current}
-            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`}
+            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
             onPress={() => {}}
           />
         ))}
@@ -518,19 +564,11 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Scroll from the press dispatch itself: a transcript row moves only while
-  // the call answers the person's own input.
+  // Scroll from the press dispatch itself (a click or a hotkey).
   on('ui.press', { plugin: 'turn-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
     const entry = entries[index]
-    if (!entry) return next(e)
-    try {
-      const result = await $.ui.scroll({ to: { requestId: entry.id }, block: 'start' })
-      if (result.deny) $.ui.toast(`turn-rail: ${result.deny}`)
-      if (noteScroll(unreachable, entry.id, result.deny)) $.ui.invalidate('ui.render')
-    } catch (err) {
-      $.ui.toast(`turn-rail: ${(err as Error).message}`)
-    }
+    if (entry) await jumpTo($, entry.id, unreachable)
     return next(e)
   })
 }

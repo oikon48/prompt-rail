@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, noteScroll, tick } from './index.tsx'
+import { bar, noteScroll, stepFrom, tick } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -171,8 +171,19 @@ type Beneath = {
   invalidations: number
   settings: Map<string, unknown>
   panes: string[]
+  commands: unknown[]
+  toasts: string[]
 }
-const beneath = (transcript = TRANSCRIPT): Beneath => ({ transcript, mtimeMs: 1, reads: 0, invalidations: 0, settings: new Map(), panes: [] })
+const beneath = (transcript = TRANSCRIPT): Beneath => ({
+  transcript,
+  mtimeMs: 1,
+  reads: 0,
+  invalidations: 0,
+  settings: new Map(),
+  panes: [],
+  commands: [],
+  toasts: [],
+})
 
 // The world beneath the plugin for a session whose transcript is TRANSCRIPT,
 // with a store in memory the test can read.
@@ -203,7 +214,10 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
   on('classic.SessionStart', () => ({}))
   on('classic.Stop', () => ({}))
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
-  on('command.register', () => ({ value: { command: 'prompts' } }))
+  on('command.register', ($: any, e: any) => {
+    disk.commands.push(e)
+    return { value: { command: e.name } }
+  })
   on('config.set', ($: any, e: any) => {
     disk.settings.set(e.key, e.value)
     return { value: e.value }
@@ -216,7 +230,10 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
     disk.panes.push(`close ${e.id}`)
     return { value: undefined }
   })
-  on('ui.toast', () => {})
+  on('ui.toast', ($: any, e: any) => {
+    disk.toasts.push(e.text)
+    return { value: undefined }
+  })
   on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.text }))
   on('ui.render', { component: 'ToolUse' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.tool }))
   on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => $.ui.resolve(e).Box({}))
@@ -460,4 +477,65 @@ test('a session starts in the mode the setting holds, vertical by default', asyn
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   expect(disk.settings.size).toBe(0)
   expect(disk.panes).toEqual(['open turn-rail'])
+})
+
+test('the next and previous prompts step over ones that cannot be scrolled to', () => {
+  const none = () => false
+  expect([stepFrom(1, 4, 1, none), stepFrom(1, 4, -1, none)]).toEqual([2, 0])
+  // At either end there is nowhere to go.
+  expect([stepFrom(3, 4, 1, none), stepFrom(0, 4, -1, none)]).toEqual([-1, -1])
+  // Unknown where the reader is: the first or the last prompt.
+  expect([stepFrom(-1, 4, 1, none), stepFrom(-1, 4, -1, none)]).toEqual([0, 3])
+  const second = (i: number) => i === 2
+  expect([stepFrom(1, 4, 1, second), stepFrom(3, 4, -1, second)]).toEqual([3, 1])
+  expect(stepFrom(-1, 0, 1, none)).toBe(-1)
+})
+
+test('/prompts runs mid-turn and takes next and prev', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.commands).toEqual([expect.objectContaining({ name: 'prompts', immediate: true, argumentHint: '[vertical|horizontal|next|prev]' })])
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompts', args: 'next' })
+  await $.command.run({ command: 'prompts', args: 'prev' })
+  // Neither is taken for a bad argument, and neither changes the mode.
+  expect(disk.toasts.filter(text => text.includes('/prompts ['))).toEqual([])
+  expect(disk.settings.size).toBe(0)
+})
+
+test('a focused vertical pane gives its first nine rows the digits as hotkeys', async ($, on) => {
+  world(on)
+  for (let i = 0; i < 10; i++) {
+    const row = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: `p${i}`, props: prompt(`prompt ${i}`, null) })
+    await row.unmount()
+  }
+  const hotkeys = async (surface: 'terminal' | 'desktop', placement: 'dock' | 'inline', isFocused: boolean) => {
+    const site = await $.ui.mount({ plugin: 'turn-rail', surface, component: 'Pane', requestId: 'turn-rail', props: { ...pane(placement, 40), isFocused } })
+    const keys = (await site.findAll({ type: 'Button' })).map((b: any) => b.props.hotkey)
+    await site.unmount()
+    return keys
+  }
+  const digits = ['1', '2', '3', '4', '5', '6', '7', '8', '9', undefined]
+  expect(await hotkeys('terminal', 'dock', true)).toEqual(digits)
+  expect(await hotkeys('desktop', 'inline', true)).toEqual(digits)
+  // Unfocused, a digit would never reach it, and `1:` would only crowd the row.
+  expect(await hotkeys('terminal', 'dock', false)).toEqual(Array(10).fill(undefined))
+})
+
+test('a focused pane makes room for the hotkey so each row stays one line', async ($, on) => {
+  await drawPrompts($, on)
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('a long prompt that would not fit beside its tick and hotkey', null) })
+  const labels = async (bodyColumns: number) => {
+    const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: { ...pane('dock', bodyColumns), isFocused: true } })
+    // The surface draws a plain Button with a hotkey as `1: label`.
+    const drawn = (await rail.findAll({ type: 'Button' })).map((b: any) => `${b.props.hotkey}: ${b.props.label}`)
+    await rail.unmount()
+    return drawn
+  }
+  const wide = await labels(30)
+  expect(wide[2]).toBe('3: ─ a long prompt that woul…')
+  expect(Math.max(...wide.map(label => label.length))).toBeLessThanOrEqual(29)
+  // Too narrow for text: the hotkey and the tick fill the rail.
+  expect(await labels(4)).toEqual(['1: ─', '2: ━', '3: ─'])
 })
