@@ -68,9 +68,8 @@ const drawPrompts = async ($: any, on: any) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({}))
   on('ui.toast', () => {})
-  const m1 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
-  const m2 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', { first: 0, last: 3, of: 4 }) })
-  return { m1, m2 }
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', { first: 0, last: 3, of: 4 }) })
 }
 
 test('a narrow vertical rail leaves the prompt text to hidden cards in the band', async ($, on) => {
@@ -96,92 +95,88 @@ test('wide characters are cut by the cells they take', async ($, on) => {
   expect((await rail.findAll({ type: 'Button' })).map(b => b.props.label)[2]).toBe(' ─ 日本語…')
 })
 
-test('/turn-rail horizontal draws bars over a text line, tall only where being read', async ($, on) => {
+test('/turn-rail horizontal draws a text line over one row of bars, heavy where being read', async ($, on) => {
   await drawPrompts($, on)
   await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  // Upper row: only the prompt on screen stands a bar; lower row: every prompt.
-  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ', '┃', '│', '┃'])
-  // The text line shows the prompt on screen until a bar is hovered.
-  expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeDefined()
+  // One bar per prompt, the one on screen heavy.
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '┃'])
+  // The text line, above the bars, shows the prompt on screen until a bar is hovered.
+  const drawn = await band.findAll({})
+  const line = drawn.findIndex((node: any) => node.type === 'Text' && /^#2 second prompt$/.test(String(node.text)))
+  expect(line).toBeGreaterThanOrEqual(0)
+  expect(line).toBeLessThan(drawn.findIndex((node: any) => node.type === 'Button'))
   expect((await band.find({ key: 'card-0' }))?.props.display).toBe('none')
   expect((await band.press({ key: 'jump-0' }))?.element).toBe('jump-0')
-  expect((await band.press({ key: 'jump-0-upper' }))?.element).toBe('jump-0-upper')
 })
 
-test('with several prompts on screen only the topmost one stands tall', async ($, on) => {
+test('with no prompt on screen the text line shows the newest one and no bar is heavy', async ($, on) => {
+  on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  mock.store(on)
+  on('config.set', ($: any, e: any) => ({ value: e.value }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({}))
+  on('ui.toast', () => {})
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', null) })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  // An empty line reads as a broken rail; the heavy bar still means "being read".
+  expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeDefined()
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '│'])
+})
+
+test('the horizontal band keeps the focus ring off its bars', async ($, on) => {
+  const moves: (string | undefined)[] = []
+  // Stand in for the engine moving the ring.
+  on('ui.focus', ($: any, e: any) => {
+    moves.push(e.element)
+    return {}
+  })
+  await drawPrompts($, on)
+  const focus = (component: 'AbovePrompt' | 'Pane', plugin: string, element: string) =>
+    $.ui.focus({ component, requestId: component === 'Pane' ? 'turn-rail' : 'above-prompt', plugin, element, origin: { kind: 'person' } })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  // A lit bar left behind after a click reads as a stuck hover, so the ring
+  // stays where it was; a press still jumps.
+  expect((await focus('AbovePrompt', 'turn-rail', 'jump-0')).deny).toBeDefined()
+  expect((await focus('AbovePrompt', 'turn-rail', 'jump-1')).deny).toBeDefined()
+  expect(moves).toEqual([])
+  // Another plugin's element in the band moves it.
+  await focus('AbovePrompt', 'survey', 'yes')
+  expect(moves).toEqual(['yes'])
+})
+
+test('the vertical pane keeps the focus ring off its rows, the engine\'s own stops aside', async ($, on) => {
+  const moves: (string | undefined)[] = []
+  // Stand in for the engine moving the ring.
+  on('ui.focus', ($: any, e: any) => {
+    moves.push(e.element ?? 'engine stop')
+    return {}
+  })
+  await drawPrompts($, on)
+  await $.command.run({ command: 'turn-rail', args: 'vertical' })
+  // A ringed row beside the row under the pointer lights two rows at once;
+  // the digits still jump while the pane holds the keyboard.
+  const ringed = await $.ui.focus({ component: 'Pane', requestId: 'turn-rail', plugin: 'turn-rail', element: 'jump-0', origin: { kind: 'person' } })
+  expect(ringed.deny).toBeDefined()
+  expect(moves).toEqual([])
+  // The pane's close mark is the engine's, so the ring still reaches it.
+  await $.ui.focus({ component: 'Pane', requestId: 'turn-rail', origin: { kind: 'person' } })
+  expect(moves).toEqual(['engine stop'])
+})
+
+test('with several prompts on screen only the topmost one is heavy', async ($, on) => {
   await drawPrompts($, on)
   await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
   await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   // m2 and m3 both show; m2 is the one being read.
-  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ', '┃', ' ', '│', '┃', '│'])
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '┃', '│'])
   expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeDefined()
-})
-
-// A Raster row's background colors, decoded from its base64 u32 triplets.
-const CELL_DEFAULT = 0x01000000
-const CELL_THUMB = 0x00606060
-const bgsOf = (raster: any) => {
-  const s: string = raster.props.cells
-  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-  const bytes: number[] = []
-  for (let i = 0; i + 3 < s.length; i += 4) {
-    const n =
-      (abc.indexOf(s[i]!) << 18) |
-      (abc.indexOf(s[i + 1]!) << 12) |
-      ((s[i + 2] === '=' ? 0 : abc.indexOf(s[i + 2]!)) << 6) |
-      (s[i + 3] === '=' ? 0 : abc.indexOf(s[i + 3]!))
-    bytes.push(n >> 16, (n >> 8) & 0xff, n & 0xff)
-  }
-  return Array.from({ length: raster.props.columns }, (_, i) => bytes[i * 12 + 8]! | (bytes[i * 12 + 9]! << 8) | (bytes[i * 12 + 10]! << 16) | (bytes[i * 12 + 11]! << 24))
-}
-
-test('the viewport span lights the cells over the prompts on screen', async ($, on) => {
-  await drawPrompts($, on)
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  const thumb = await band.find({ type: 'Raster' })
-  // m2 alone is on screen: one lit cell, over its bar.
-  expect(thumb?.props.columns).toBe(2)
-  expect(bgsOf(thumb)).toEqual([CELL_DEFAULT, CELL_THUMB])
-})
-
-test('the span runs from the topmost shown prompt through the bottommost', async ($, on) => {
-  await drawPrompts($, on)
-  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  const thumb = await band.find({ type: 'Raster' })
-  // m2 and m3 show: the span covers the cells over both bars.
-  expect(bgsOf(thumb)).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-})
-
-test('a lone report from the top edge keeps the span over the prompts below', async ($, on) => {
-  const { m2 } = await drawPrompts($, on)
-  const m3 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-  // A new pass past the 150 ms window: a tool row of the bottom prompt
-  // leaving and the top edge alone re-reporting prove nothing about the
-  // bottom edge, so the span is kept.
-  await new Promise(resolve => setTimeout(resolve, 200))
-  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'ToolUse', requestId: 't3', props: { tool_use_id: 't3', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: null } })
-  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-  // A tool row seen on the bottom prompt keeps it once the prompt's own row
-  // is gone; the span moves up only when the last row known on it leaves.
-  await new Promise(resolve => setTimeout(resolve, 200))
-  const m4 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm4', props: prompt('fourth prompt', { first: 0, last: 1, of: 2 }) })
-  const t4 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'ToolUse', requestId: 't4', props: { tool_use_id: 't4', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: { first: 0, last: 1, of: 2 } } })
-  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
-  await m4.redraw(prompt('fourth prompt', null))
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB, CELL_THUMB])
-  await new Promise(resolve => setTimeout(resolve, 200))
-  await t4.redraw({ tool_use_id: 't4', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: null })
-  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_DEFAULT, CELL_DEFAULT])
 })
 
 // A transcript JSONL from rows given in order; each row's parent is the one
@@ -336,7 +331,7 @@ test('a reload lists the prompts again from the remembered transcript', async ($
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  expect((await band.findAll({ type: 'Button' })).length).toBe(8)
+  expect((await band.findAll({ type: 'Button' })).length).toBe(4)
 })
 
 test('prompts are listed in transcript order, wrappers left out, repeats kept', async ($, on) => {
@@ -422,7 +417,7 @@ const overflowBand = async ($: any, on: any, reading: number) => {
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 14 } })
   const lower = (await band.findAll({ type: 'Button' })).map((b: any) => String(b.props.key)).filter((key: string) => /^jump-\d+$/.test(key))
   const marks = (await band.findAll({ type: 'Text' })).map((t: any) => t.text).filter((text: string) => text === '‹' || text === '›')
-  return { lower, marks, band }
+  return { lower, marks }
 }
 
 test('an overflowing horizontal rail keeps the prompt being read near the start', async ($, on) => {
@@ -441,15 +436,6 @@ test('an overflowing horizontal rail keeps the prompt being read near the end', 
   const { lower, marks } = await overflowBand($, on, 10)
   expect(lower).toEqual(['jump-4', 'jump-5', 'jump-6', 'jump-7', 'jump-8', 'jump-9', 'jump-10', 'jump-11'])
   expect(marks).toEqual(['‹'])
-})
-
-test('an overflowing rail shifts the lit cell under its bar', async ($, on) => {
-  const { band } = await overflowBand($, on, 6)
-  const thumb = await band.find({ type: 'Raster' })
-  // A leading cell for the elision mark, then the eight bars: prompt 6 is the
-  // fifth shown (prompts 2 to 9), so the sixth cell lights.
-  expect(thumb?.props.columns).toBe(9)
-  expect(bgsOf(thumb)).toEqual([CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT, CELL_THUMB, CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT])
 })
 
 // The engine's answer for a row the transcript does not draw (a slash
@@ -541,7 +527,7 @@ test('/turn-rail <mode> writes the mode setting and switches at once', async ($,
   expect(disk.settings.get('turn-rail.mode')).toBe('horizontal')
   expect(disk.panes.at(-1)).toBe('close turn-rail')
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  expect((await band.findAll({ type: 'Button' })).length).toBe(8)
+  expect((await band.findAll({ type: 'Button' })).length).toBe(4)
   await $.command.run({ command: 'turn-rail', args: 'vertical' })
   expect(disk.settings.get('turn-rail.mode')).toBe('vertical')
   expect(disk.panes.at(-1)).toBe('open turn-rail')
@@ -565,6 +551,43 @@ test('a session starts in the mode the setting holds, vertical by default', asyn
   expect(disk.panes).toEqual(['open turn-rail'])
 })
 
+test('/turn-rail off hides the rail until a mode turns it back on', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'turn-rail', args: 'off' })
+  expect(disk.settings.get('turn-rail.mode')).toBe('off')
+  expect(disk.panes.at(-1)).toBe('close turn-rail')
+  // No pane and no band.
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+  // Bare /turn-rail says how to turn it on instead of opening anything.
+  const panes = disk.panes.length
+  await $.command.run({ command: 'turn-rail', args: '' })
+  expect(disk.panes.length).toBe(panes)
+  expect(disk.toasts.at(-1)).toMatch(/off/)
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  expect(disk.settings.get('turn-rail.mode')).toBe('horizontal')
+  await band.unmount()
+  const onBand = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await onBand.findAll({ type: 'Button' })).length).toBeGreaterThan(0)
+})
+
+// The kit loads the module with its default options, so the session starts
+// again after the command, as a module reloaded with the setting off does.
+test('a session starts with no rail while the setting is off', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'turn-rail', args: 'off' })
+  disk.panes.length = 0
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.panes).toEqual(['close turn-rail'])
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+})
+
 test('the next and previous prompts step over ones that cannot be scrolled to', () => {
   const none = () => false
   expect([stepFrom(1, 4, 1, none), stepFrom(1, 4, -1, none)]).toEqual([2, 0])
@@ -581,7 +604,7 @@ test('/turn-rail runs mid-turn and takes next and prev', async ($, on) => {
   const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.commands).toEqual([expect.objectContaining({ name: 'turn-rail', immediate: true, argumentHint: '[vertical|horizontal|next|prev]' })])
+  expect(disk.commands).toEqual([expect.objectContaining({ name: 'turn-rail', immediate: true, argumentHint: '[off|vertical|horizontal|next|prev]' })])
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await $.command.run({ command: 'turn-rail', args: 'next' })
   await $.command.run({ command: 'turn-rail', args: 'prev' })
@@ -620,9 +643,9 @@ test('a focused pane makes room for the hotkey so each row stays one line', asyn
     return drawn
   }
   const wide = await labels(30)
-  expect(wide[2]).toBe('3: ─ a long prompt that wou…')
-  // With the mark's cell before it, a row still leaves the frame a cell.
-  expect(Math.max(...wide.map(label => 1 + label.length))).toBeLessThanOrEqual(29)
+  expect(wide[2]).toBe('3: ─ a long prompt that woul…')
+  // A row still leaves the frame a cell.
+  expect(Math.max(...wide.map(label => label.length))).toBeLessThanOrEqual(29)
   // Too narrow for text: the hotkey and the tick fill the rail.
   expect(await labels(4)).toEqual(['1: ─', '2: ━', '3: ─'])
 })
@@ -825,12 +848,14 @@ const OUTCOMES = jsonl([
   { type: 'user', uuid: 'u4', message: { role: 'user', content: 'fourth' } },
 ])
 
-// Each row's mark as [glyph, color] from the pane's marks column.
-const paneMarks = async ($: any, surface: 'terminal' | 'desktop' = 'terminal', placement: 'dock' | 'inline' = 'dock') => {
-  const site = await $.ui.mount({ plugin: 'turn-rail', surface, component: 'Pane', requestId: 'turn-rail', props: pane(placement, 40) })
-  const marks = (await site.findAll({ type: 'Text' })).map((t: any) => [t.text, t.props.color])
+// The turn details each hidden card of a narrow vertical rail carries.
+const cardDetails = async ($: any) => {
+  const site = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: pane('dock', 4) })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const details = (await band.findAll({ type: 'Text' })).map((t: any) => String(t.text)).filter((text: string) => !/^#\d+ $/.test(text))
+  await band.unmount()
   await site.unmount()
-  return marks
+  return details
 }
 
 test('a turn is summed up with how it ended', () => {
@@ -839,17 +864,25 @@ test('a turn is summed up with how it ended', () => {
   expect(turnLine({ tools: 2, files: [], outcome: 'running' })).toBe('running · 2 tools')
 })
 
-test('each row is marked by how its turn went', async ($, on) => {
+test('no rail draws a colored mark; how a turn went is left to its card', async ($, on) => {
   world(on, {}, OUTCOMES)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  const expected = [['×', 'error'], ['×', 'error'], ['•', 'success'], [' ', undefined]]
-  expect(await paneMarks($)).toEqual(expected)
-  expect(await paneMarks($, 'desktop', 'inline')).toEqual(expected)
-  // The ticks keep their place: the mark takes the cell before them.
+  for (const [surface, placement] of [['terminal', 'dock'], ['desktop', 'inline']] as const) {
+    const site = await $.ui.mount({ plugin: 'turn-rail', surface, component: 'Pane', requestId: 'turn-rail', props: pane(placement, 40) })
+    expect(await site.findAll({ type: 'Text' })).toEqual([])
+    await site.unmount()
+  }
+  expect(await cardDetails($)).toEqual(['first · interrupted', 'second · API error', 'third · 1 tool · a.ts', 'fourth'])
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const texts = await band.findAll({ type: 'Text' })
+  expect(texts.filter((t: any) => t.props.color !== undefined || ['×', '•'].includes(t.text))).toEqual([])
+  await band.unmount()
+  await $.command.run({ command: 'turn-rail', args: 'vertical' })
   expect(await railLabels($)).toEqual(['first', 'second', 'third', 'fourth'])
 })
 
-test('the running turn is marked until it ends, then by how it ended', async ($, on) => {
+test('the running turn\'s card says so until it ends, then how it ended', async ($, on) => {
   world(on, {}, '')
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
@@ -858,55 +891,23 @@ test('the running turn is marked until it ends, then by how it ended', async ($,
   const row = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u1', props: prompt('first', null) })
   await row.unmount()
   await $.turn.start({ text: 'first', turnId: 't1' })
-  expect(await paneMarks($)).toEqual([['•', 'warning']])
+  expect(await cardDetails($)).toEqual(['first · running'])
   await $.turn.complete({ answer: '', durationMs: 3000, isAborted: true, turnId: 't1', reason: 'aborted' })
-  expect(await paneMarks($)).toEqual([['×', 'error']])
+  expect(await cardDetails($)).toEqual(['first · 3s · interrupted'])
 })
 
-test('the horizontal rail marks each bar in the row above it', async ($, on) => {
-  world(on, {}, OUTCOMES)
-  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  const marks = (await band.findAll({ type: 'Text' })).filter((t: any) => /^mark-/.test(String(t.props.key ?? t.key ?? '')) || ['×', '•'].includes(t.text))
-  expect(marks.map((t: any) => [t.text, t.props.color])).toEqual([['×', 'error'], ['×', 'error'], ['•', 'success']])
-})
-
-test('where the pane waits undrawn, the status line shows the position', async ($, on) => {
+// The status line belongs to the person: the rail pins nothing there, even
+// where neither the pane nor the band shows it.
+test('the rail never pins a status line', async ($, on) => {
   const disk = { ...beneath(), placed: false }
   world(on, {}, TRANSCRIPT, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u3', props: prompt('continue', { first: 0, last: 1, of: 2 }) })
-  expect(disk.status.at(-1)).toBe('#3/4')
-  // Once the pane is drawn it shows the position itself.
-  const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: pane('dock', 40) })
-  expect(disk.status.at(-1)).toBeUndefined()
-  await rail.unmount()
-})
-
-// The kit raises no person's close of a pane; that path is checked live.
-test('a pane that can no longer be drawn brings the position back to the status line', async ($, on) => {
-  const disk = beneath()
-  world(on, {}, TRANSCRIPT, disk)
-  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.status).toEqual([])
-  // The terminal narrows; the pane closed for the band waits undrawn when reopened.
-  disk.placed = false
   await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   await $.command.run({ command: 'turn-rail', args: 'vertical' })
-  expect(disk.status.at(-1)).toBe('#–/4')
-})
-
-test('the horizontal band needs no status line', async ($, on) => {
-  const disk = { ...beneath(), placed: false }
-  world(on, {}, TRANSCRIPT, disk)
-  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.status.at(-1)).toBe('#–/4')
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  expect(disk.status.at(-1)).toBeUndefined()
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
+  expect(disk.status).toEqual([])
 })
 
 test('a reply the transcript read has not seen yet counts as the newest prompt\'s', async ($, on) => {
@@ -936,33 +937,34 @@ test('a prompt still drawn under its provisional id places no one', async ($, on
   expect(await band.find({ type: 'Text', text: /^#1 first stored prompt$/ })).toBeDefined()
 })
 
-test('a new prompt\'s turn marks that prompt, not the one before it', async ($, on) => {
+test('a new prompt\'s turn runs under that prompt, not the one before it', async ($, on) => {
   world(on, {}, jsonl([{ type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } }]))
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   // The turn for "second" starts before its row is stored under its uuid.
   await $.turn.start({ text: 'second', turnId: 't2' })
-  expect(await paneMarks($)).toEqual([[' ', undefined]])
+  expect(await cardDetails($)).toEqual(['first'])
   const row = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u2', props: prompt('second', null) })
   await row.unmount()
-  expect(await paneMarks($)).toEqual([[' ', undefined], ['•', 'warning']])
+  expect(await cardDetails($)).toEqual(['first', 'second · running'])
   await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't2', reason: 'answer' })
   // A continuation (no typed text) runs under the newest prompt at once.
   await $.turn.start({ text: '', turnId: 't3' })
-  expect(await paneMarks($)).toEqual([[' ', undefined], ['•', 'warning']])
+  expect(await cardDetails($)).toEqual(['first', 'second · 1s · running'])
 })
 
-test('a repeated prompt\'s turn does not mark the earlier one with the same text', async ($, on) => {
+test('a repeated prompt\'s turn does not run under the earlier one with the same text', async ($, on) => {
   world(on)
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   // The transcript ends in "continue"; the person sends "continue" again.
   await $.turn.start({ text: 'continue', turnId: 't5' })
-  expect((await paneMarks($)).map(([glyph]: any) => glyph)).toEqual([' ', ' ', ' ', ' '])
+  const isRunning = async () => (await cardDetails($)).map((details: string) => details.endsWith('running'))
+  expect(await isRunning()).toEqual([false, false, false, false])
   const row = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u5', props: prompt('continue', null) })
   await row.unmount()
-  expect((await paneMarks($)).map(([glyph]: any) => glyph)).toEqual([' ', ' ', ' ', ' ', '•'])
+  expect(await isRunning()).toEqual([false, false, false, false, true])
 })
 
 test('a late reply of the turn before stays with its prompt once a new one is sent', async ($, on) => {

@@ -38,15 +38,10 @@ const RAIL_INSET = 2
 // Other refusals (a race with another move) pass, so they leave the tick be.
 const NOT_DRAWN = /nothing drawn/
 
-// The colors a Raster cell takes: `0x00RRGGBB`, or bit 24 alone for the
-// terminal's default — a theme color name does not reach a Raster, so the
-// viewport thumb's gray is fixed instead of following the theme.
-const CELL_DEFAULT = 0x01000000
-const CELL_THUMB = 0x00606060
-
-// vertical: ticks in a docked pane; horizontal: ticks in a row above the prompt.
-type Mode = 'vertical' | 'horizontal'
-const isMode = (value: unknown): value is Mode => value === 'vertical' || value === 'horizontal'
+// vertical: ticks in a docked pane; horizontal: ticks in a row above the
+// prompt; off: no rail at all. One setting, so /config keeps a single row.
+type Mode = 'off' | 'vertical' | 'horizontal'
+const isMode = (value: unknown): value is Mode => value === 'off' || value === 'vertical' || value === 'horizontal'
 
 type Entry = { id: string; text: string }
 
@@ -71,37 +66,6 @@ const cellWidth = (text: string) => [...text].reduce((sum, char) => sum + cells(
 // `text` padded with spaces to `width` cells, so a card painted over the
 // default line hides it whole.
 const padTo = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - cellWidth(text)))
-
-const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-// Standard padded base64 of `bytes`: the sandbox's Uint8Array#toBase64 where
-// it exists, by hand where it does not.
-const base64 = (bytes: Uint8Array) => {
-  const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64
-  if (typeof native === 'function') return native.call(bytes)
-  let out = ''
-  for (let i = 0; i < bytes.length; i += 3) {
-    const n = ((bytes[i] ?? 0) << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
-    out +=
-      B64.charAt(n >> 18) +
-      B64.charAt((n >> 12) & 63) +
-      (i + 1 < bytes.length ? B64.charAt((n >> 6) & 63) : '=') +
-      (i + 2 < bytes.length ? B64.charAt(n & 63) : '=')
-  }
-  return out
-}
-
-// One row of Raster cells: a space per cell, background lit where `isLit`,
-// row-major little-endian `[codePoint, foreground, background]` u32 triplets
-// as base64.
-const rasterRow = (count: number, isLit: (i: number) => boolean) => {
-  const words = new Uint32Array(count * 3)
-  for (let i = 0; i < count; i++) {
-    words[i * 3] = 0x20
-    words[i * 3 + 1] = CELL_DEFAULT
-    words[i * 3 + 2] = isLit(i) ? CELL_THUMB : CELL_DEFAULT
-  }
-  return base64(new Uint8Array(words.buffer))
-}
 
 // The prompt on one line, cut to `width` terminal cells with an ellipsis.
 const oneLine = (text: string, width: number) => {
@@ -150,17 +114,6 @@ export type Turn = { durationMs?: number; spanMs?: number; tools: number; files:
 // A turn still running, stopped by the person, or ended by an API error.
 type Outcome = 'running' | 'interrupted' | 'error'
 const OUTCOME_WORDS: Record<Outcome, string> = { running: 'running', interrupted: 'interrupted', error: 'API error' }
-
-// The mark beside a prompt's tick, by how its turn went, in theme colors.
-type Mark = { glyph: string; color: string }
-const MARKS: Record<Outcome | 'edited', Mark> = {
-  running: { glyph: '•', color: 'warning' },
-  interrupted: { glyph: '×', color: 'error' },
-  error: { glyph: '×', color: 'error' },
-  edited: { glyph: '•', color: 'success' },
-}
-export const markOf = (turn: Turn | undefined): Mark | undefined =>
-  turn?.outcome ? MARKS[turn.outcome] : turn && turn.files.length > 0 ? MARKS.edited : undefined
 
 // A duration as the rail shows it: `7s`, `1m 23s`, `1h 2m`.
 const duration = (ms: number) => {
@@ -350,6 +303,16 @@ async function rememberTranscript($: EngineInterface, sessionId: string, transcr
   await Promise.all(dated.slice(KEPT_TRANSCRIPTS).map(({ key }) => $.store.delete(key)))
 }
 
+// Open the pane where the mode draws the rail in it; close it elsewhere (off,
+// or horizontal on the terminal, where the band carries the rail).
+async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
+  if (mode === 'off' || (mode === 'horizontal' && isTerminal)) {
+    await $.ui.close({ id: PANE })
+  } else {
+    await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
+  }
+}
+
 // Write the mode setting, as a change in /config would; say so if refused.
 async function writeMode($: EngineInterface, mode: Mode) {
   const result = await $.config.set({ key: MODE_SETTING, value: mode })
@@ -367,13 +330,6 @@ async function jumpTo($: EngineInterface, id: string, unreachable: Set<string>) 
   } catch (err) {
     $.ui.toast(`turn-rail: ${(err as Error).message}`)
   }
-}
-
-// Pin the position as this plugin's status line, or clear it, when it changed.
-function pinStatus($: EngineInterface, text: string | undefined, pinned: { text?: string }) {
-  if (pinned.text === text) return
-  pinned.text = text
-  $.ui.status(text)
 }
 
 // The transcript path remembered for this session, if any.
@@ -422,12 +378,6 @@ export const register: Register = (on, options) => {
   // read, since a row that left away from the viewport's edges is not told.
   let pass = { at: 0, rows: new Map<string, boolean>() }
   let lastCurrent = -1
-  // The bottom edge of the span on screen, for the viewport thumb.
-  let lastBottom = -1
-  // The rows of the bottom prompt the engine still shows, as far as it told
-  // us: a shown report adds one, an off-screen report drops one. The bottom
-  // edge can only have moved up once the last of them is gone.
-  let bottomRows = new Set<string>()
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
   const seen: Seen = { path: '', size: -1, mtimeMs: -1 }
@@ -449,75 +399,35 @@ export const register: Register = (on, options) => {
     pass.rows.set(id, isShown)
   }
 
-  // The span of prompts on screen: the smallest and greatest index among the
-  // latest pass's shown rows, a reply or tool row counting as its prompt's.
-  // A scroll reports the rows at the viewport's edges, a redraw every row, so
-  // the shown rows of either bound the viewport. Each bound is kept while no
-  // known row shows, and the bottom keeps while a row of its prompt is known
-  // on the screen — a sparse pass may simply not carry the bottom edge's
-  // reports, so its greatest shown index is only a lower bound.
-  const shownRange = () => {
+  // Where the person is reading: the prompt that the topmost row of the latest
+  // pass belongs to, a reply counting as its prompt's. A scroll reports the
+  // rows at the viewport's edges, a redraw every row, so the topmost shown row
+  // of either is the viewport's top. Kept while no known row shows.
+  const currentIndex = () => {
     const promptIndex = new Map(entries.map((entry, i) => [entry.id, i]))
-    // Where a row counts on the rail: a prompt at its own index, a reply or
-    // tool row at its owner's, a row no prompt owns at the newest one's. A row
-    // the transcript read does not know was written after it: the Stop hook
-    // reads before the turn's last reply is stored, and a running turn's rows
-    // come later still, so only the newest turn can own one.
-    const indexOf = (id: string) => {
-      const ownerId = owners.get(id)
-      return promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
-    }
-    // A list that shrank under the saved bottom (a rewind) leaves it off the
-    // end: it is gone, not merely unproven.
-    if (lastBottom >= entries.length) {
-      lastBottom = -1
-      bottomRows = new Set()
-    }
-    let top = -1
-    let bottom = -1
+    let best = -1
     for (const [id, isShown] of pass.rows) {
-      if (id === PROVISIONAL_ID) continue
-      const i = indexOf(id)
-      if (!isShown) {
-        if (i === lastBottom) bottomRows.delete(id)
-        continue
-      }
-      if (i === undefined) continue
-      if (i === lastBottom) bottomRows.add(id)
-      if (top < 0 || i < top) top = i
-      if (bottom < 0 || i > bottom) bottom = i
+      if (!isShown || id === PROVISIONAL_ID) continue
+      const ownerId = owners.get(id)
+      // A reply or tool row the transcript read does not know was written
+      // after it: the Stop hook reads before the turn's last reply is stored,
+      // and a running turn's rows come later still. A turn's start reads the
+      // file again, so only the newest turn can own it.
+      const i = promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
+      if (i !== undefined && (best < 0 || i < best)) best = i
     }
-    if (top >= 0) {
-      lastCurrent = top
-      // The edge moved: a lower prompt shows, or the last row known on the
-      // saved one left. Re-anchor the known rows at the new bottom.
-      if (bottom > lastBottom || (bottom < lastBottom && bottomRows.size === 0)) {
-        lastBottom = bottom
-        bottomRows = new Set(
-          [...pass.rows]
-            .filter(([id, isShown]) => isShown && id !== PROVISIONAL_ID && indexOf(id) === bottom)
-            .map(([id]) => id),
-        )
-      }
-    }
-    const bound = (last: number) => (last >= 0 && last < entries.length ? last : -1)
-    return [bound(lastCurrent), bound(lastBottom)] as const
+    if (best >= 0) lastCurrent = best
+    return lastCurrent < entries.length ? lastCurrent : -1
   }
-  // Where the person is reading: the prompt owning the viewport's top row.
-  const currentIndex = () => shownRange()[0]
 
-  // Record one onScreen report; true when it moved the span on screen — the
-  // prompt being read or the viewport's bottom edge, the things a report can
-  // change in the drawing. The bottom edge only shows in the horizontal
-  // band's thumb row; elsewhere its moves are not worth a redraw. A scroll
-  // that only reports the viewport's edges and lands on another prompt
-  // redraws, and that redraw's full pass of reports settles the prompt at the
-  // viewport's top.
+  // Record one onScreen report; true when it moved the prompt being read, the
+  // one thing a report changes in the drawing. A scroll that only reports the
+  // viewport's edges and lands on another prompt redraws, and that redraw's
+  // full pass of reports settles the prompt at the viewport's top.
   const seeMoves = (id: string, isShown: boolean) => {
-    const [beforeTop, beforeBottom] = shownRange()
+    const before = currentIndex()
     see(id, isShown)
-    const [top, bottom] = shownRange()
-    return top !== beforeTop || (mode === 'horizontal' && bottom !== beforeBottom)
+    return currentIndex() !== before
   }
 
   // A change of the setting reloads this module with the new value.
@@ -525,18 +435,6 @@ export const register: Register = (on, options) => {
   // The subagent whose transcript is in view, as the rail's sites last drew;
   // undefined for the main conversation, whose rows alone the rail lists.
   let viewAgent: string | undefined
-  // Whether the pane is drawn: opened and placed, or drawing now; undefined
-  // until the session's first open answers, so nothing flickers before it.
-  let paneShown: boolean | undefined
-  const pinned: { text?: string } = {}
-  // Where neither the pane nor the band shows the rail (a pane waiting for
-  // room on a narrow terminal, or one the person closed), the status line
-  // carries the position: `#3/12`, `#–/12` while no prompt is known on screen.
-  const statusText = () => {
-    if ((mode === 'horizontal' && isTerminal) || paneShown !== false || viewAgent !== undefined || entries.length === 0) return undefined
-    const current = currentIndex()
-    return `#${current >= 0 ? current + 1 : '–'}/${entries.length}`
-  }
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
   let railColumns = 0
@@ -547,8 +445,8 @@ export const register: Register = (on, options) => {
       // every other plugin's and the built-ins, so a generic name would collide.
       name: 'turn-rail',
       description:
-        'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt); next or prev jumps to the next or previous prompt.',
-      argumentHint: '[vertical|horizontal|next|prev]',
+        'Show the prompt rail: vertical (a pane beside the transcript), horizontal (above the prompt) or off; next or prev jumps to the next or previous prompt.',
+      argumentHint: '[off|vertical|horizontal|next|prev]',
       // Runs while a turn streams, so next and prev move through it then too.
       immediate: true,
     })
@@ -569,12 +467,7 @@ export const register: Register = (on, options) => {
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /turn-rail); below that it waits undrawn.
-    if (mode === 'vertical' || !isTerminal) {
-      paneShown = (await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })).isPlaced
-    } else {
-      await $.ui.close({ id: PANE })
-    }
-    pinStatus($, statusText(), pinned)
+    await seatRail($, mode, isTerminal)
     return next(e)
   })
 
@@ -594,17 +487,17 @@ export const register: Register = (on, options) => {
       return {}
     }
     if (asked && !isMode(asked)) {
-      $.ui.toast('turn-rail: /turn-rail [vertical|horizontal|next|prev]')
+      $.ui.toast('turn-rail: /turn-rail [off|vertical|horizontal|next|prev]')
+      return {}
+    }
+    // Reopening a rail that is off would only close it again: say how to turn it on.
+    if (!asked && mode === 'off') {
+      $.ui.toast('turn-rail: the rail is off; /turn-rail vertical or /turn-rail horizontal turns it on')
       return {}
     }
     if (isMode(asked)) mode = asked
-    if (mode === 'horizontal' && isTerminal) {
-      await $.ui.close({ id: PANE })
-    } else {
-      paneShown = (await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })).isPlaced
-    }
+    await seatRail($, mode, isTerminal)
     $.ui.invalidate('ui.render')
-    pinStatus($, statusText(), pinned)
     // Last: a changed setting reloads this module, which then starts in it.
     if (isMode(asked)) await writeMode($, asked)
     return {}
@@ -635,8 +528,6 @@ export const register: Register = (on, options) => {
       isRunning = false
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
-      lastBottom = -1
-      bottomRows = new Set()
       unreachable.clear()
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       $.ui.invalidate('ui.render')
@@ -645,7 +536,6 @@ export const register: Register = (on, options) => {
       if (index && merge(index)) $.ui.invalidate('ui.render')
     }
     listedAtRest = entries.length
-    pinStatus($, statusText(), pinned)
     await rememberTranscript($, e.session_id, e.transcript_path)
     return next(e)
   })
@@ -653,17 +543,7 @@ export const register: Register = (on, options) => {
   on('classic.Stop', async ($, e, next) => {
     const index = await readTranscript($, e.transcript_path, seen)
     if (index && merge(index)) $.ui.invalidate('ui.render')
-    pinStatus($, statusText(), pinned)
     return next(e)
-  })
-
-  // The pane closed, by this plugin or by the person: the status line takes
-  // over while the rail is vertical.
-  on('ui.close', { id: PANE }, async ($, e, next) => {
-    const result = await next(e)
-    paneShown = false
-    pinStatus($, statusText(), pinned)
-    return result
   })
 
   // A main-loop turn starts (a subagent's run raises none): the newest
@@ -704,10 +584,7 @@ export const register: Register = (on, options) => {
     if (PROMPT_KINDS.has(e.props.origin.kind) && !e.props.text.trimStart().startsWith('/')) {
       const isAdded = addPrompt(e.requestId, e.props.text)
       const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
-      if (isAdded || isMoved) {
-        $.ui.invalidate('ui.render')
-        pinStatus($, statusText(), pinned)
-      }
+      if (isAdded || isMoved) $.ui.invalidate('ui.render')
     }
     return next(e)
   })
@@ -716,32 +593,20 @@ export const register: Register = (on, options) => {
   // answers. Tool rows are drawn under their tool_use id; a collapsed group
   // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
-    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
 
@@ -760,8 +625,6 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
     viewAgent = e.props.view.agentId
-    paneShown = true
-    pinStatus($, statusText(), pinned)
     const nextColumns = isRail ? e.props.bodyColumns : 0
     if (nextColumns !== railColumns) {
       // The band decides from this whether it carries the cards.
@@ -782,27 +645,15 @@ export const register: Register = (on, options) => {
     // The surface draws such a row as `1: label`, three cells the label gives up.
     const isKeyed = (i: number) => e.props.isFocused && i < 9
     const hotkey = (i: number) => (isKeyed(i) ? { hotkey: String(i + 1) } : {})
-    // The cell before each tick marks how its turn went; it lights with the row.
-    const mark = (entry: Entry, i: number) => {
-      const found = markOf(turnOf(entry.id))
-      return (
-        <Text {...(found ? { color: found.color } : {})} hover={{ scope: `turn-rail-${i}`, inverse: true }}>
-          {found?.glyph ?? ' '}
-        </Text>
-      )
-    }
     // Docked on the terminal: one row per prompt, its tick and its text, the
     // whole row pressable. Too narrow for text, ticks alone (the band shows it).
     if (isRail) {
       const hasRoom = e.props.bodyColumns >= INLINE_REVEAL_MIN_COLUMNS
-      const width = Math.max(4, e.props.bodyColumns - 5)
+      const width = Math.max(4, e.props.bodyColumns - 4)
       return (
         <Box flexDirection="column">
           {entries.map((entry, i) => (
-            <Box flexDirection="row">
-              {/* A keyed tick alone fills a narrow rail: no cell for a mark. */}
-              {isKeyed(i) && !hasRoom ? null : mark(entry, i)}
-              <Button
+            <Button
               key={`jump-${i}`}
               plain
               {...hotkey(i)}
@@ -818,28 +669,24 @@ export const register: Register = (on, options) => {
               }
               hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
-              />
-            </Box>
+            />
           ))}
         </Box>
       )
     }
     // Elsewhere (inline, or a surface with no band for the card): list the text.
-    const width = Math.max(8, e.props.bodyColumns - 4)
+    const width = Math.max(8, e.props.bodyColumns - 3)
     return (
       <Box flexDirection="column">
         {entries.map((entry, i) => (
-          <Box flexDirection="row">
-            {mark(entry, i)}
-            <Button
-              key={`jump-${i}`}
-              plain
-              {...hotkey(i)}
-              dimColor={i !== current}
-              label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
-              onPress={() => {}}
-            />
-          </Box>
+          <Button
+            key={`jump-${i}`}
+            plain
+            {...hotkey(i)}
+            dimColor={i !== current}
+            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
+            onPress={() => {}}
+          />
         ))}
       </Box>
     )
@@ -850,10 +697,9 @@ export const register: Register = (on, options) => {
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
     viewAgent = e.props.view.agentId
-    pinStatus($, statusText(), pinned)
-    // Nothing while a survey holds the band or a subagent's transcript is in view.
-    if (e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
-    const { Box, Text, Button, Raster } = $.ui.resolve(e)
+    // Nothing while the rail is off, a survey holds the band or a subagent's transcript is in view.
+    if (mode === 'off' || e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const cards = (width: number) =>
       entries.map((entry, i) => (
         <Box key={`card-${i}`} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
@@ -863,15 +709,11 @@ export const register: Register = (on, options) => {
       ))
 
     if (mode === 'horizontal') {
-      // Five rows: the viewport's span on the rail as one row of colored
-      // cells, which also parts the rail from the transcript; one of marks;
-      // two of bars; then the text line beside the prompt. A bar stands two
-      // rows only for the prompt being read and the hovered one. The text
-      // line shows the prompt being read, dim, and the hovered one's card
-      // painted over it.
+      // Two rows: the text line, then the bars beside the prompt. The text line
+      // shows the prompt being read, dim, and the hovered one's card painted
+      // over it; the bar of the prompt being read is heavy.
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
-      const [top, bottom] = shownRange()
-      const current = top
+      const current = currentIndex()
       // More prompts than cells: a window of bars centered on the prompt being
       // read (the newest when none is known), `‹` and `›` marking what it hides.
       const isOverflowing = entries.length > width
@@ -880,14 +722,6 @@ export const register: Register = (on, options) => {
       const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
       const shown = entries.slice(first, first + capacity)
       const hidesAfter = first + capacity < entries.length
-      // The span's cells sit over the bars they shade: cell `inset` + i lights
-      // for prompt `first` + i while it is between the viewport's edges.
-      const inset = isOverflowing ? 1 : 0
-      const span = Math.max(bottom, top)
-      const inThumb = (cell: number) => {
-        const i = first + cell - inset
-        return top >= 0 && i >= top && i <= span
-      }
       const label = (i: number) => `#${i + 1} ${oneLine(entries[i]?.text ?? '', width - `#${i + 1} `.length)}`
       // The hovered prompt's card also sums up its turn.
       const card = (i: number) => {
@@ -896,44 +730,31 @@ export const register: Register = (on, options) => {
       }
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
-          {Raster === undefined ? null : (
-            <Raster key="thumb" columns={inset + shown.length} rows={1} cells={rasterRow(inset + shown.length, inThumb)} />
-          )}
-          <Box flexDirection="row">
-            {isOverflowing ? <Text> </Text> : null}
-            {shown.map(entry => {
-              const found = markOf(turnOf(entry.id))
-              return <Text {...(found ? { color: found.color } : {})}>{found?.glyph ?? ' '}</Text>
-            })}
-          </Box>
-          {(['upper', 'lower'] as const).map(row => (
-            <Box flexDirection="row">
-              {isOverflowing ? <Text dimColor>{row === 'lower' && first > 0 ? '‹' : ' '}</Text> : null}
-              {shown.map((entry, offset) => {
-                const i = first + offset
-                // An empty upper cell turns solid under the hover's inverse.
-                const glyph = row === 'lower' ? bar(i === current, isUnreachable(i)) : i === current ? '┃' : ' '
-                return (
-                  <Button
-                    key={row === 'lower' ? `jump-${i}` : `jump-${i}-upper`}
-                    plain
-                    dimColor={i !== current}
-                    label={glyph}
-                    hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
-                    onPress={() => {}}
-                  />
-                )
-              })}
-              {row === 'lower' && hidesAfter ? <Text dimColor>›</Text> : null}
-            </Box>
-          ))}
           <Box height={1} width={width}>
-            <Text dimColor wrap="truncate-end">{current >= 0 ? label(current) : ' '}</Text>
+            {/* With no prompt known on screen, the newest: an empty line reads as a broken rail. */}
+            <Text dimColor wrap="truncate-end">{label(center)}</Text>
             {entries.map((_, i) => (
               <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
                 <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
               </Box>
             ))}
+          </Box>
+          <Box flexDirection="row">
+            {isOverflowing ? <Text dimColor>{first > 0 ? '‹' : ' '}</Text> : null}
+            {shown.map((entry, offset) => {
+              const i = first + offset
+              return (
+                <Button
+                  key={`jump-${i}`}
+                  plain
+                  dimColor={i !== current}
+                  label={bar(i === current, isUnreachable(i))}
+                  hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
+                  onPress={() => {}}
+                />
+              )
+            })}
+            {hidesAfter ? <Text dimColor>›</Text> : null}
           </Box>
         </Box>
       )
@@ -944,6 +765,23 @@ export const register: Register = (on, options) => {
     }
     return next(e)
   })
+
+  // The band holds the keyboard after a click or ctrl+x tab, and a ring on a
+  // bar stays lit until Escape, which reads as a hover that will not clear.
+  // Keep the ring off the horizontal rail's bars; a click still presses, and
+  // /turn-rail next and prev are its keyboard route.
+  on('ui.focus', { component: 'AbovePrompt', plugin: 'turn-rail' }, async ($, e, next) => {
+    if (mode === 'horizontal') return { deny: 'turn-rail: the rail takes clicks, not the focus ring' }
+    return next(e)
+  })
+
+  // In the pane, a ringed row and the row under the pointer light at once and
+  // read as two highlights. Keep the ring off the rows; the digits still jump
+  // while the pane holds the keyboard, and the engine's own stops (the close
+  // mark, the tabs) carry no plugin, so the matcher leaves them be.
+  on('ui.focus', { component: 'Pane', requestId: PANE, plugin: 'turn-rail' }, async () => ({
+    deny: 'turn-rail: the rail takes clicks and digits, not the focus ring',
+  }))
 
   // Scroll from the press dispatch itself (a click or a hotkey).
   on('ui.press', { plugin: 'turn-rail' }, async ($, e, next) => {
