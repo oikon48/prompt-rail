@@ -54,7 +54,8 @@ Mouse works best with `"tui": "fullscreen"`. While the repository is private, ad
 | `/prompt-rail horizontal` | Bars above the prompt input |
 | `/prompt-rail vertical` | A pane beside the transcript |
 | `/prompt-rail off` | Hide the rail |
-| `/prompt-rail next` / `prev` | Jump to the next or previous prompt |
+| `/prompt-rail next` | Jump to the next prompt |
+| `/prompt-rail prev` | Jump to the previous prompt |
 | `/prompt-rail` | Reopen the rail in the current layout |
 
 The layout is also the "Rail mode" row in `/config`, and it is kept across sessions. In the vertical pane, ctrl+x tab and a digit `1` to `9` jump to that prompt.
