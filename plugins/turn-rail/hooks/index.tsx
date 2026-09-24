@@ -38,9 +38,10 @@ const RAIL_INSET = 2
 // Other refusals (a race with another move) pass, so they leave the tick be.
 const NOT_DRAWN = /nothing drawn/
 
-// vertical: ticks in a docked pane; horizontal: ticks in a row above the prompt.
-type Mode = 'vertical' | 'horizontal'
-const isMode = (value: unknown): value is Mode => value === 'vertical' || value === 'horizontal'
+// vertical: ticks in a docked pane; horizontal: ticks in a row above the
+// prompt; off: no rail at all. One setting, so /config keeps a single row.
+type Mode = 'off' | 'vertical' | 'horizontal'
+const isMode = (value: unknown): value is Mode => value === 'off' || value === 'vertical' || value === 'horizontal'
 
 type Entry = { id: string; text: string }
 
@@ -313,6 +314,17 @@ async function rememberTranscript($: EngineInterface, sessionId: string, transcr
   await Promise.all(dated.slice(KEPT_TRANSCRIPTS).map(({ key }) => $.store.delete(key)))
 }
 
+// Open the pane where the mode draws the rail in it and answer whether it is
+// placed; close it elsewhere (off, or horizontal on the terminal, where the
+// band carries the rail) and answer undefined.
+async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
+  if (mode === 'off' || (mode === 'horizontal' && isTerminal)) {
+    await $.ui.close({ id: PANE })
+    return undefined
+  }
+  return (await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })).isPlaced
+}
+
 // Write the mode setting, as a change in /config would; say so if refused.
 async function writeMode($: EngineInterface, mode: Mode) {
   const result = await $.config.set({ key: MODE_SETTING, value: mode })
@@ -450,7 +462,7 @@ export const register: Register = (on, options) => {
   // room on a narrow terminal, or one the person closed), the status line
   // carries the position: `#3/12`, `#–/12` while no prompt is known on screen.
   const statusText = () => {
-    if ((mode === 'horizontal' && isTerminal) || paneShown !== false || viewAgent !== undefined || entries.length === 0) return undefined
+    if (mode === 'off' || (mode === 'horizontal' && isTerminal) || paneShown !== false || viewAgent !== undefined || entries.length === 0) return undefined
     const current = currentIndex()
     return `#${current >= 0 ? current + 1 : '–'}/${entries.length}`
   }
@@ -464,8 +476,8 @@ export const register: Register = (on, options) => {
       // every other plugin's and the built-ins, so a generic name would collide.
       name: 'turn-rail',
       description:
-        'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt); next or prev jumps to the next or previous prompt.',
-      argumentHint: '[vertical|horizontal|next|prev]',
+        'Show the prompt rail: vertical (a pane beside the transcript), horizontal (above the prompt) or off; next or prev jumps to the next or previous prompt.',
+      argumentHint: '[off|vertical|horizontal|next|prev]',
       // Runs while a turn streams, so next and prev move through it then too.
       immediate: true,
     })
@@ -486,11 +498,8 @@ export const register: Register = (on, options) => {
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /turn-rail); below that it waits undrawn.
-    if (mode === 'vertical' || !isTerminal) {
-      paneShown = (await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })).isPlaced
-    } else {
-      await $.ui.close({ id: PANE })
-    }
+    const placed = await seatRail($, mode, isTerminal)
+    if (placed !== undefined) paneShown = placed
     pinStatus($, statusText(), pinned)
     return next(e)
   })
@@ -511,15 +520,17 @@ export const register: Register = (on, options) => {
       return {}
     }
     if (asked && !isMode(asked)) {
-      $.ui.toast('turn-rail: /turn-rail [vertical|horizontal|next|prev]')
+      $.ui.toast('turn-rail: /turn-rail [off|vertical|horizontal|next|prev]')
+      return {}
+    }
+    // Reopening a rail that is off would only close it again: say how to turn it on.
+    if (!asked && mode === 'off') {
+      $.ui.toast('turn-rail: the rail is off; /turn-rail vertical or /turn-rail horizontal turns it on')
       return {}
     }
     if (isMode(asked)) mode = asked
-    if (mode === 'horizontal' && isTerminal) {
-      await $.ui.close({ id: PANE })
-    } else {
-      paneShown = (await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })).isPlaced
-    }
+    const placed = await seatRail($, mode, isTerminal)
+    if (placed !== undefined) paneShown = placed
     $.ui.invalidate('ui.render')
     pinStatus($, statusText(), pinned)
     // Last: a changed setting reloads this module, which then starts in it.
@@ -766,8 +777,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
     viewAgent = e.props.view.agentId
     pinStatus($, statusText(), pinned)
-    // Nothing while a survey holds the band or a subagent's transcript is in view.
-    if (e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
+    // Nothing while the rail is off, a survey holds the band or a subagent's transcript is in view.
+    if (mode === 'off' || e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const cards = (width: number) =>
       entries.map((entry, i) => (

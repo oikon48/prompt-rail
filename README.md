@@ -24,11 +24,13 @@ Start a new session afterwards. The rail opens on its own when the session start
 
 ## Usage
 
-The rail is driven by the `/turn-rail` command, named after the plugin so it does not collide with other plugins' commands. The rail has two modes. The mode is the plugin's "Rail mode" setting, which `/config` lists as a picker, and `/turn-rail vertical` or `/turn-rail horizontal` is a shortcut that writes the same setting. Either way the change applies at once and is kept for later sessions, since Claude Code stores it under `pluginConfigs` in `~/.claude/settings.json`. A mode saved by an earlier version of the plugin moves into the setting the next time a session starts.
+The rail is driven by the `/turn-rail` command, named after the plugin so it does not collide with other plugins' commands. The rail has two modes and can be turned off. All three live in one setting, the plugin's "Rail mode", which `/config` lists as a single row; selecting it opens a picker with `off`, `vertical` and `horizontal`. `/turn-rail off`, `/turn-rail vertical` and `/turn-rail horizontal` are shortcuts that write the same setting. Either way the change applies at once and is kept for later sessions, since Claude Code stores it under `pluginConfigs` in `~/.claude/settings.json`. A mode saved by an earlier version of the plugin moves into the setting the next time a session starts.
 
 `/turn-rail vertical` is the default. It docks a pane beside the transcript with one row per prompt, a tick and the prompt's first line. The row of the prompt you are reading is drawn bright with a thick tick. If you drag the pane narrower than 12 columns, the rows shrink to ticks and the hovered prompt's text appears above the prompt input instead.
 
-`/turn-rail horizontal` closes the pane and draws the rail in the band above the prompt input, as four rows: a row of marks that also separates it from the transcript, two rows of upright bars, and a text line. The prompt you are reading stands two rows tall and its text is shown dimmed on the text line. Hovering a bar raises it to two rows and replaces the text line with that prompt. When there are more prompts than the row can hold, it shows a window centered on the prompt you are reading, with `‹` and `›` marking the prompts elided on either side.
+`/turn-rail horizontal` closes the pane and draws the rail in the band above the prompt input, as four rows: a row of marks that also separates it from the transcript, two rows of upright bars, and a text line. The prompt you are reading stands two rows tall and its text is shown dimmed on the text line. Hovering a bar raises it to two rows and replaces the text line with that prompt. When there are more prompts than the row can hold, it shows a window centered on the prompt you are reading, with `‹` and `›` marking the prompts elided on either side. Clicking a bar jumps without leaving a focus highlight on it, since the band keeps its focus ring off the bars.
+
+`/turn-rail off` closes the pane and leaves the band above the prompt input empty. The rail stays off in later sessions until you pick a mode again.
 
 A mark before each tick tells how that prompt's turn went: a yellow `•` while it runs, a red `×` when it was interrupted or ended in an API error, and a green `•` when it edited files. The horizontal rail draws the marks in its top row, above the bars. They use the theme's warning, error and success colors, so they follow the theme you picked.
 
@@ -40,7 +42,7 @@ A prompt whose click the engine refused because its row is not drawn in the tran
 
 When the vertical pane is not on screen, because the terminal is too narrow to seat it or because you closed it, the status line under the prompt input shows where you are instead, as `#3/12` (`#–/12` until a prompt is known to be on screen). It clears once the pane is drawn again, and the horizontal rail needs no status line.
 
-Running `/turn-rail` with no argument reopens the rail in the current mode. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
+Running `/turn-rail` with no argument reopens the rail in the current mode. While the rail is off it opens nothing and says which command turns it on. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
 
 ## How it works
 

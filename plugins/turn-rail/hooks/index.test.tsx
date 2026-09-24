@@ -513,6 +513,43 @@ test('a session starts in the mode the setting holds, vertical by default', asyn
   expect(disk.panes).toEqual(['open turn-rail'])
 })
 
+test('/turn-rail off hides the rail until a mode turns it back on', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'turn-rail', args: 'off' })
+  expect(disk.settings.get('turn-rail.mode')).toBe('off')
+  expect(disk.panes.at(-1)).toBe('close turn-rail')
+  // No pane and no band.
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+  // Bare /turn-rail says how to turn it on instead of opening anything.
+  const panes = disk.panes.length
+  await $.command.run({ command: 'turn-rail', args: '' })
+  expect(disk.panes.length).toBe(panes)
+  expect(disk.toasts.at(-1)).toMatch(/off/)
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  expect(disk.settings.get('turn-rail.mode')).toBe('horizontal')
+  await band.unmount()
+  const onBand = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await onBand.findAll({ type: 'Button' })).length).toBeGreaterThan(0)
+})
+
+// The kit loads the module with its default options, so the session starts
+// again after the command, as a module reloaded with the setting off does.
+test('a session starts with no rail while the setting is off', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'turn-rail', args: 'off' })
+  disk.panes.length = 0
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.panes).toEqual(['close turn-rail'])
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+})
+
 test('the next and previous prompts step over ones that cannot be scrolled to', () => {
   const none = () => false
   expect([stepFrom(1, 4, 1, none), stepFrom(1, 4, -1, none)]).toEqual([2, 0])
@@ -529,7 +566,7 @@ test('/turn-rail runs mid-turn and takes next and prev', async ($, on) => {
   const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.commands).toEqual([expect.objectContaining({ name: 'turn-rail', immediate: true, argumentHint: '[vertical|horizontal|next|prev]' })])
+  expect(disk.commands).toEqual([expect.objectContaining({ name: 'turn-rail', immediate: true, argumentHint: '[off|vertical|horizontal|next|prev]' })])
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await $.command.run({ command: 'turn-rail', args: 'next' })
   await $.command.run({ command: 'turn-rail', args: 'prev' })
