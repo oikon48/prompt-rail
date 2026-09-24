@@ -449,9 +449,9 @@ export const register: Register = (on, options) => {
   // latest pass's shown rows, a reply or tool row counting as its prompt's.
   // A scroll reports the rows at the viewport's edges, a redraw every row, so
   // the shown rows of either bound the viewport. Each bound is kept while no
-  // known row shows, and the bottom keeps until a pass reports its own prompt
-  // off the screen — a sparse pass may simply not carry the bottom edge's
-  // reports, so its greatest shown index is only a lower bound.
+  // known row shows, and the bottom keeps until a pass reports the bottom
+  // prompt's own row off the screen — a sparse pass may simply not carry the
+  // bottom edge's reports, so its greatest shown index is only a lower bound.
   const shownRange = () => {
     const promptIndex = new Map(entries.map((entry, i) => [entry.id, i]))
     // Where a row counts on the rail: a prompt at its own index, a reply or
@@ -468,15 +468,16 @@ export const register: Register = (on, options) => {
     if (lastBottom >= entries.length) lastBottom = -1
     let top = -1
     let bottom = -1
-    // The saved bottom's own row reported off the screen — the one sign a
-    // pass can give that the bottom edge moved up. A row further down being
-    // off the screen says nothing: it was never on it.
+    // The saved bottom's own prompt row reported off the screen — the one
+    // sign a pass can give that the bottom edge moved up. A reply or tool row
+    // at that prompt leaving proves less: a sibling may stay on the screen
+    // unreported, and a row further down was never on it.
     let bottomLeft = false
     for (const [id, isShown] of pass.rows) {
       if (id === PROVISIONAL_ID) continue
       const i = indexOf(id)
       if (!isShown) {
-        if (i === lastBottom) bottomLeft = true
+        if (id === entries[lastBottom]?.id) bottomLeft = true
         continue
       }
       if (i === undefined) continue

@@ -159,15 +159,22 @@ test('the span runs from the topmost shown prompt through the bottommost', async
 
 test('a lone report from the top edge keeps the span over the prompts below', async ($, on) => {
   const { m2 } = await drawPrompts($, on)
-  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
+  const m3 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
   await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-  // Past the 150 ms pass window, only the top edge's row reports: a sparse
-  // pass proves nothing about the bottom edge, so its span is kept.
+  // A new pass past the 150 ms window: a tool row of the bottom prompt
+  // leaving and the top edge alone re-reporting prove nothing about the
+  // bottom edge, so the span is kept.
   await new Promise(resolve => setTimeout(resolve, 200))
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'ToolUse', requestId: 't3', props: { tool_use_id: 't3', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: null } })
   await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
   expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
+  // The bottom prompt's own row leaving is the one sign the edge moved up.
+  await new Promise(resolve => setTimeout(resolve, 200))
+  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
+  await m3.redraw(prompt('third prompt', null))
+  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_DEFAULT])
 })
 
 // A transcript JSONL from rows given in order; each row's parent is the one
