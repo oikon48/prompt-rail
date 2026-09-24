@@ -115,17 +115,6 @@ export type Turn = { durationMs?: number; spanMs?: number; tools: number; files:
 type Outcome = 'running' | 'interrupted' | 'error'
 const OUTCOME_WORDS: Record<Outcome, string> = { running: 'running', interrupted: 'interrupted', error: 'API error' }
 
-// The mark beside a prompt's tick, by how its turn went, in theme colors.
-type Mark = { glyph: string; color: string }
-const MARKS: Record<Outcome | 'edited', Mark> = {
-  running: { glyph: '•', color: 'warning' },
-  interrupted: { glyph: '×', color: 'error' },
-  error: { glyph: '×', color: 'error' },
-  edited: { glyph: '•', color: 'success' },
-}
-export const markOf = (turn: Turn | undefined): Mark | undefined =>
-  turn?.outcome ? MARKS[turn.outcome] : turn && turn.files.length > 0 ? MARKS.edited : undefined
-
 // A duration as the rail shows it: `7s`, `1m 23s`, `1h 2m`.
 const duration = (ms: number) => {
   const seconds = Math.floor(ms / 1000)
@@ -656,27 +645,15 @@ export const register: Register = (on, options) => {
     // The surface draws such a row as `1: label`, three cells the label gives up.
     const isKeyed = (i: number) => e.props.isFocused && i < 9
     const hotkey = (i: number) => (isKeyed(i) ? { hotkey: String(i + 1) } : {})
-    // The cell before each tick marks how its turn went; it lights with the row.
-    const mark = (entry: Entry, i: number) => {
-      const found = markOf(turnOf(entry.id))
-      return (
-        <Text {...(found ? { color: found.color } : {})} hover={{ scope: `turn-rail-${i}`, inverse: true }}>
-          {found?.glyph ?? ' '}
-        </Text>
-      )
-    }
     // Docked on the terminal: one row per prompt, its tick and its text, the
     // whole row pressable. Too narrow for text, ticks alone (the band shows it).
     if (isRail) {
       const hasRoom = e.props.bodyColumns >= INLINE_REVEAL_MIN_COLUMNS
-      const width = Math.max(4, e.props.bodyColumns - 5)
+      const width = Math.max(4, e.props.bodyColumns - 4)
       return (
         <Box flexDirection="column">
           {entries.map((entry, i) => (
-            <Box flexDirection="row">
-              {/* A keyed tick alone fills a narrow rail: no cell for a mark. */}
-              {isKeyed(i) && !hasRoom ? null : mark(entry, i)}
-              <Button
+            <Button
               key={`jump-${i}`}
               plain
               {...hotkey(i)}
@@ -692,28 +669,24 @@ export const register: Register = (on, options) => {
               }
               hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
-              />
-            </Box>
+            />
           ))}
         </Box>
       )
     }
     // Elsewhere (inline, or a surface with no band for the card): list the text.
-    const width = Math.max(8, e.props.bodyColumns - 4)
+    const width = Math.max(8, e.props.bodyColumns - 3)
     return (
       <Box flexDirection="column">
         {entries.map((entry, i) => (
-          <Box flexDirection="row">
-            {mark(entry, i)}
-            <Button
-              key={`jump-${i}`}
-              plain
-              {...hotkey(i)}
-              dimColor={i !== current}
-              label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
-              onPress={() => {}}
-            />
-          </Box>
+          <Button
+            key={`jump-${i}`}
+            plain
+            {...hotkey(i)}
+            dimColor={i !== current}
+            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
+            onPress={() => {}}
+          />
         ))}
       </Box>
     )
@@ -736,10 +709,9 @@ export const register: Register = (on, options) => {
       ))
 
     if (mode === 'horizontal') {
-      // Four rows: one of marks over the bars, which also parts the rail from
-      // the transcript, two of bars, then the text line beside the prompt. A bar stands two rows only
-      // for the prompt being read and the hovered one. The text line shows the
-      // prompt being read, dim, and the hovered one's card painted over it.
+      // Two rows: the text line, then the bars beside the prompt. The text line
+      // shows the prompt being read, dim, and the hovered one's card painted
+      // over it; the bar of the prompt being read is heavy.
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
       const current = currentIndex()
       // More prompts than cells: a window of bars centered on the prompt being
@@ -758,34 +730,6 @@ export const register: Register = (on, options) => {
       }
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
-          <Box flexDirection="row">
-            {isOverflowing ? <Text> </Text> : null}
-            {shown.map(entry => {
-              const found = markOf(turnOf(entry.id))
-              return <Text {...(found ? { color: found.color } : {})}>{found?.glyph ?? ' '}</Text>
-            })}
-          </Box>
-          {(['upper', 'lower'] as const).map(row => (
-            <Box flexDirection="row">
-              {isOverflowing ? <Text dimColor>{row === 'lower' && first > 0 ? '‹' : ' '}</Text> : null}
-              {shown.map((entry, offset) => {
-                const i = first + offset
-                // An empty upper cell turns solid under the hover's inverse.
-                const glyph = row === 'lower' ? bar(i === current, isUnreachable(i)) : i === current ? '┃' : ' '
-                return (
-                  <Button
-                    key={row === 'lower' ? `jump-${i}` : `jump-${i}-upper`}
-                    plain
-                    dimColor={i !== current}
-                    label={glyph}
-                    hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
-                    onPress={() => {}}
-                  />
-                )
-              })}
-              {row === 'lower' && hidesAfter ? <Text dimColor>›</Text> : null}
-            </Box>
-          ))}
           <Box height={1} width={width}>
             <Text dimColor wrap="truncate-end">{current >= 0 ? label(current) : ' '}</Text>
             {entries.map((_, i) => (
@@ -793,6 +737,23 @@ export const register: Register = (on, options) => {
                 <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
               </Box>
             ))}
+          </Box>
+          <Box flexDirection="row">
+            {isOverflowing ? <Text dimColor>{first > 0 ? '‹' : ' '}</Text> : null}
+            {shown.map((entry, offset) => {
+              const i = first + offset
+              return (
+                <Button
+                  key={`jump-${i}`}
+                  plain
+                  dimColor={i !== current}
+                  label={bar(i === current, isUnreachable(i))}
+                  hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
+                  onPress={() => {}}
+                />
+              )
+            })}
+            {hidesAfter ? <Text dimColor>›</Text> : null}
           </Box>
         </Box>
       )
