@@ -162,10 +162,19 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
   return { prompts, owners, known: new Set(rows.map(row => row.uuid)) }
 }
 
-// The transcript's index, or undefined before the file exists (a fresh session).
-async function readTranscript($: EngineInterface, transcriptPath: string) {
+// The size and modification time of the transcript as last read.
+type Seen = { path: string; size: number; mtimeMs: number }
+
+// The transcript's index, or undefined when it is as `seen` last read it (a
+// long session's file is not parsed again for a turn that wrote nothing) or
+// before the file exists (a fresh session). Records what it read in `seen`.
+async function readTranscript($: EngineInterface, transcriptPath: string, seen: Seen) {
   try {
-    return indexTranscript(await $.fs.read(transcriptPath))
+    const { size, mtimeMs } = await $.fs.stat(transcriptPath)
+    if (seen.path === transcriptPath && seen.size === size && seen.mtimeMs === mtimeMs) return undefined
+    const index = indexTranscript(await $.fs.read(transcriptPath))
+    Object.assign(seen, { path: transcriptPath, size, mtimeMs })
+    return index
   } catch {
     return undefined
   }
@@ -197,14 +206,14 @@ export const register: Register = (on) => {
   let entries: Entry[] = []
   // Assistant row uuid -> the prompt it answers, from the transcript.
   let owners = new Map<string, string>()
-  // Which transcript rows (prompts and replies) the viewport shows, by id, as
-  // last reported. A row that left the viewport away from its edges may keep a
-  // stale `true` here, so the current prompt is read from the latest pass alone.
-  const onScreen = new Map<string, boolean>()
+  // The latest pass of onScreen reports: which transcript rows (prompts,
+  // replies, tool rows) it said the viewport shows, by id. Only this pass is
+  // read, since a row that left away from the viewport's edges is not told.
   let pass = { at: 0, rows: new Map<string, boolean>() }
   let lastCurrent = -1
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
+  const seen: Seen = { path: '', size: -1, mtimeMs: -1 }
 
   const addPrompt = (id: string, text: string) => {
     // A new prompt is drawn under a provisional id before it is stored, then
@@ -215,15 +224,12 @@ export const register: Register = (on) => {
     return true
   }
 
-  // Record one onScreen report; true when it changed what is known.
+  // Record one onScreen report into the current pass.
   const see = (id: string, isShown: boolean) => {
     const now = Date.now()
     if (now - pass.at > PASS_MS) pass = { at: now, rows: new Map() }
     pass.at = now
     pass.rows.set(id, isShown)
-    if (onScreen.get(id) === isShown) return false
-    onScreen.set(id, isShown)
-    return true
   }
 
   // Where the person is reading: the prompt that the topmost row of the latest
@@ -243,6 +249,16 @@ export const register: Register = (on) => {
     return lastCurrent < entries.length ? lastCurrent : -1
   }
 
+  // Record one onScreen report; true when it moved the prompt being read, the
+  // one thing a report changes in the drawing. A scroll that only reports the
+  // viewport's edges and lands on another prompt redraws, and that redraw's
+  // full pass of reports settles the prompt at the viewport's top.
+  const seeMoves = (id: string, isShown: boolean) => {
+    const before = currentIndex()
+    see(id, isShown)
+    return currentIndex() !== before
+  }
+
   let mode: Mode = 'vertical'
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
@@ -260,11 +276,8 @@ export const register: Register = (on) => {
     // Also fired after a hot reload, when the list starts empty: rebuild it from
     // the transcript this session's classic SessionStart remembered.
     const transcriptPath = await rememberedTranscript($)
-    const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath)
-    if (index) {
-      merge(index)
-      $.ui.invalidate('ui.render')
-    }
+    const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen)
+    if (index && merge(index)) $.ui.invalidate('ui.render')
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /prompts); below that it waits undrawn.
     if (mode === 'vertical' || !isTerminal) await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
@@ -293,35 +306,36 @@ export const register: Register = (on) => {
   // Rebuild the list from the transcript file, whose uuids are the ids the
   // transcript rows are drawn under. A resumed session so lists prompts the
   // surface has not drawn yet; a row drawn but not stored yet stays after them,
-  // and one the file holds off the live branch (rewound away) drops out.
+  // and one the file holds off the live branch (rewound away) drops out. True
+  // when the list or the prompt being read changed, so the rail needs a redraw.
   const merge = (index: TranscriptIndex) => {
+    const listed = (list: Entry[]) => list.map(entry => `${entry.id}\u0000${entry.text}`).join('\u0001')
+    const before = { list: listed(entries), current: currentIndex() }
     entries = [...index.prompts, ...entries.filter(entry => !index.known.has(entry.id))]
     owners = new Map(index.owners.map(([id, i]) => [id, index.prompts[i]?.id ?? '']))
+    return listed(entries) !== before.list || currentIndex() !== before.current
   }
 
   on('classic.SessionStart', async ($, e, next) => {
     if (e.source === 'clear') {
       entries = []
       owners = new Map()
-      onScreen.clear()
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
       unreachable.clear()
+      Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
+      $.ui.invalidate('ui.render')
     } else {
-      const index = await readTranscript($, e.transcript_path)
-      if (index) merge(index)
+      const index = await readTranscript($, e.transcript_path, seen)
+      if (index && merge(index)) $.ui.invalidate('ui.render')
     }
     await rememberTranscript($, e.session_id, e.transcript_path)
-    $.ui.invalidate('ui.render')
     return next(e)
   })
 
   on('classic.Stop', async ($, e, next) => {
-    const index = await readTranscript($, e.transcript_path)
-    if (index) {
-      merge(index)
-      $.ui.invalidate('ui.render')
-    }
+    const index = await readTranscript($, e.transcript_path, seen)
+    if (index && merge(index)) $.ui.invalidate('ui.render')
     return next(e)
   })
 
@@ -330,7 +344,7 @@ export const register: Register = (on) => {
     // A slash command's row is drawn as a user row too; it is not a prompt.
     if (PROMPT_KINDS.has(e.props.origin.kind) && !e.props.text.trimStart().startsWith('/')) {
       const isAdded = addPrompt(e.requestId, e.props.text)
-      const isMoved = e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)
+      const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
       if (isAdded || isMoved) $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -340,20 +354,20 @@ export const register: Register = (on) => {
   // answers. Tool rows are drawn under their tool_use id; a collapsed group
   // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
-    if (id && e.props.onScreen !== undefined && see(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
 

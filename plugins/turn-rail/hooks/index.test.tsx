@@ -160,21 +160,36 @@ const COMPACTED = jsonl([
   { type: 'user', uuid: 'p2', message: { role: 'user', content: 'after compact' } },
 ])
 
+// What the world beneath the plugin holds and counts: the transcript file's
+// text (a test may change it), how often the plugin read it, and how often it
+// asked for a redraw.
+type Disk = { transcript: string; mtimeMs: number; reads: number; invalidations: number }
+
 // The world beneath the plugin for a session whose transcript is TRANSCRIPT,
 // with a store in memory the test can read.
-const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRANSCRIPT) => {
+const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRANSCRIPT, disk: Disk = { transcript, mtimeMs: 1, reads: 0, invalidations: 0 }) => {
   const store = new Map<string, unknown>(Object.entries(initial))
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', ($: any, e: any) => {
     store.set(e.key, e.value)
-    return {}
+    return { value: undefined }
   })
   on('store.keys', () => ({ value: [...store.keys()] }))
   on('store.delete', ($: any, e: any) => {
     store.delete(e.key)
-    return {}
+    return { value: undefined }
   })
-  on('fs.read', ($: any, e: any) => ({ value: e.path === '/t/s1.jsonl' ? transcript : '' }))
+  on('fs.read', ($: any, e: any) => {
+    disk.reads++
+    return { value: e.path === '/t/s1.jsonl' ? disk.transcript : '' }
+  })
+  on('fs.stat', ($: any, e: any) => ({
+    value: { kind: 'file', size: e.path === '/t/s1.jsonl' ? disk.transcript.length : 0, mtimeMs: disk.mtimeMs, isLink: false },
+  }))
+  on('ui.invalidate', () => {
+    disk.invalidations++
+    return { value: undefined }
+  })
   on('session.id', () => ({ value: 's1' }))
   on('classic.SessionStart', () => ({}))
   on('classic.Stop', () => ({}))
@@ -343,4 +358,51 @@ test('a jump that lands makes the prompt reachable again', () => {
 test('an unreachable prompt is drawn with a dotted tick and bar, unless being read', () => {
   expect([tick(false), tick(true), tick(false, true), tick(true, true)]).toEqual(['─', '━', '┄', '━'])
   expect([bar(false), bar(true), bar(false, true), bar(true, true)]).toEqual(['│', '┃', '┆', '┃'])
+})
+
+test('an unchanged transcript is not read again when a turn ends', async ($, on) => {
+  const disk: Disk = { transcript: TRANSCRIPT, mtimeMs: 1, reads: 0, invalidations: 0 }
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(disk.reads).toBe(1)
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(disk.reads).toBe(1)
+  // A turn that wrote to it is read.
+  disk.transcript = `${TRANSCRIPT}\n${JSON.stringify({ type: 'user', uuid: 'u5', parentUuid: 'u4', message: { role: 'user', content: 'fifth' } })}`
+  disk.mtimeMs = 2
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(disk.reads).toBe(2)
+  expect(await railLabels($)).toEqual(['first stored prompt', '<div> why does this overflow?', 'continue', 'continue', 'fifth'])
+})
+
+test('a turn that changes neither the list nor the prompt being read redraws nothing', async ($, on) => {
+  const disk: Disk = { transcript: TRANSCRIPT, mtimeMs: 1, reads: 0, invalidations: 0 }
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await railLabels($)
+  const before = disk.invalidations
+  // Same list, rewritten on disk (a row the index skips was appended).
+  disk.transcript = `${TRANSCRIPT}\n${JSON.stringify({ type: 'system', uuid: 's9', parentUuid: 'u4', subtype: 'turn_duration' })}`
+  disk.mtimeMs = 2
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(disk.reads).toBe(2)
+  expect(disk.invalidations).toBe(before)
+})
+
+test('a scroll redraws only when the prompt being read changes', async ($, on) => {
+  const disk: Disk = { transcript: TRANSCRIPT, mtimeMs: 1, reads: 0, invalidations: 0 }
+  world(on, { mode: 'horizontal' }, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  const shown = { first: 0, last: 1, of: 2 }
+  const u1 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u1', props: prompt('first stored prompt', shown) })
+  const u2 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u2', props: prompt('<div> why does this overflow?', shown) })
+  await railLabels($)
+  const before = disk.invalidations
+  // The lower row leaves the viewport; the topmost one, and so the prompt being read, stays.
+  await u2.redraw(prompt('<div> why does this overflow?', null))
+  expect(disk.invalidations).toBe(before)
+  // Now the top row leaves as the next one enters: the prompt being read moves.
+  await u1.redraw(prompt('first stored prompt', null))
+  await u2.redraw(prompt('<div> why does this overflow?', shown))
+  expect(disk.invalidations).toBe(before + 1)
 })

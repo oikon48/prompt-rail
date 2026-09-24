@@ -36,7 +36,7 @@ Running `/prompts` with no argument reopens the rail in the current mode. While 
 
 ## How it works
 
-The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. It follows the chain of parent rows back from the newest one, so prompts abandoned with `/rewind` are left out. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll.
+The plugin reads the session's transcript file to list every prompt, including the ones the terminal has not drawn yet after a resume, and to learn which prompt each reply and tool call belongs to. It follows the chain of parent rows back from the newest one, so prompts abandoned with `/rewind` are left out. Transcript rows are drawn under their transcript uuid, so a click can ask the engine to scroll that row into view. The prompt you are reading is the one that owns the topmost row in the latest batch of on-screen reports the engine sends while you scroll. The rail asks for a redraw only when the list or the prompt you are reading changes, and when a turn ends it reads the transcript again only if the file's size or modification time changed.
 
 ## Limitations
 
