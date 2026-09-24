@@ -8,7 +8,10 @@ const RAIL_COLUMNS = 4
 // Below this many body columns the vertical rail has no room to reveal the
 // prompt beside a tick, so the band above the prompt shows it instead.
 const INLINE_REVEAL_MIN_COLUMNS = 12
-const MODE_KEY = 'mode'
+// The mode is the plugin's `mode` setting (userConfig), a row in /config. An
+// earlier version kept it in the store under this key, shared by every session.
+const LEGACY_MODE_KEY = 'mode'
+const MODE_SETTING = 'turn-rail.mode'
 // `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
 // session.start carries no path) can rebuild its list. One key per session, so
 // sessions starting together never rewrite each other's; the newest few stay.
@@ -196,13 +199,19 @@ async function rememberTranscript($: EngineInterface, sessionId: string, transcr
   await Promise.all(dated.slice(KEPT_TRANSCRIPTS).map(({ key }) => $.store.delete(key)))
 }
 
+// Write the mode setting, as a change in /config would; say so if refused.
+async function writeMode($: EngineInterface, mode: Mode) {
+  const result = await $.config.set({ key: MODE_SETTING, value: mode })
+  if (result.deny) $.ui.toast(`turn-rail: the mode was not saved: ${result.deny}`)
+}
+
 // The transcript path remembered for this session, if any.
 async function rememberedTranscript($: EngineInterface) {
   const value = (await $.store.get(`${TRANSCRIPT_KEY_PREFIX}${await $.session.id()}`)) as { path?: unknown } | undefined
   return typeof value?.path === 'string' ? value.path : undefined
 }
 
-export const register: Register = (on) => {
+export const register: Register = (on, options) => {
   let entries: Entry[] = []
   // Assistant row uuid -> the prompt it answers, from the transcript.
   let owners = new Map<string, string>()
@@ -259,7 +268,8 @@ export const register: Register = (on) => {
     return currentIndex() !== before
   }
 
-  let mode: Mode = 'vertical'
+  // A change of the setting reloads this module with the new value.
+  let mode: Mode = isMode(options.mode) ? options.mode : 'vertical'
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
   let railColumns = 0
@@ -270,9 +280,15 @@ export const register: Register = (on) => {
       description: 'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt).',
       argumentHint: '[vertical|horizontal]',
     })
-    const stored = await $.store.get(MODE_KEY)
-    if (isMode(stored)) mode = stored
     isTerminal = e.surface === 'terminal'
+    // Move a mode an earlier version stored into the setting, once. Writing
+    // the setting reloads this module, so everything after it is best effort.
+    const stored = await $.store.get(LEGACY_MODE_KEY)
+    if (stored !== undefined) await $.store.delete(LEGACY_MODE_KEY)
+    if (isMode(stored) && stored !== mode) {
+      mode = stored
+      await writeMode($, mode)
+    }
     // Also fired after a hot reload, when the list starts empty: rebuild it from
     // the transcript this session's classic SessionStart remembered.
     const transcriptPath = await rememberedTranscript($)
@@ -281,6 +297,7 @@ export const register: Register = (on) => {
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /prompts); below that it waits undrawn.
     if (mode === 'vertical' || !isTerminal) await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
+    else await $.ui.close({ id: PANE })
     return next(e)
   })
 
@@ -290,16 +307,15 @@ export const register: Register = (on) => {
       $.ui.toast('turn-rail: /prompts [vertical|horizontal]')
       return {}
     }
-    if (isMode(asked)) {
-      mode = asked
-      await $.store.set(MODE_KEY, mode)
-    }
+    if (isMode(asked)) mode = asked
     if (mode === 'horizontal' && isTerminal) {
       await $.ui.close({ id: PANE })
     } else {
       await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
     }
     $.ui.invalidate('ui.render')
+    // Last: a changed setting reloads this module, which then starts in it.
+    if (isMode(asked)) await writeMode($, asked)
     return {}
   })
 

@@ -64,6 +64,7 @@ const drawPrompts = async ($: any, on: any) => {
     return <Box />
   })
   mock.store(on)
+  on('config.set', ($: any, e: any) => ({ value: e.value }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({}))
   on('ui.toast', () => {})
@@ -161,13 +162,21 @@ const COMPACTED = jsonl([
 ])
 
 // What the world beneath the plugin holds and counts: the transcript file's
-// text (a test may change it), how often the plugin read it, and how often it
-// asked for a redraw.
-type Disk = { transcript: string; mtimeMs: number; reads: number; invalidations: number }
+// text (a test may change it), how often the plugin read it, how often it
+// asked for a redraw, the settings it wrote, and the panes it opened or closed.
+type Beneath = {
+  transcript: string
+  mtimeMs: number
+  reads: number
+  invalidations: number
+  settings: Map<string, unknown>
+  panes: string[]
+}
+const beneath = (transcript = TRANSCRIPT): Beneath => ({ transcript, mtimeMs: 1, reads: 0, invalidations: 0, settings: new Map(), panes: [] })
 
 // The world beneath the plugin for a session whose transcript is TRANSCRIPT,
 // with a store in memory the test can read.
-const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRANSCRIPT, disk: Disk = { transcript, mtimeMs: 1, reads: 0, invalidations: 0 }) => {
+const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRANSCRIPT, disk: Beneath = beneath(transcript)) => {
   const store = new Map<string, unknown>(Object.entries(initial))
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', ($: any, e: any) => {
@@ -195,8 +204,18 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
   on('classic.Stop', () => ({}))
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'prompts' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.close', () => ({}))
+  on('config.set', ($: any, e: any) => {
+    disk.settings.set(e.key, e.value)
+    return { value: e.value }
+  })
+  on('ui.open', ($: any, e: any) => {
+    disk.panes.push(`open ${e.id}`)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', ($: any, e: any) => {
+    disk.panes.push(`close ${e.id}`)
+    return { value: undefined }
+  })
   on('ui.toast', () => {})
   on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.text }))
   on('ui.render', { component: 'ToolUse' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: e.props.tool }))
@@ -219,8 +238,9 @@ test('the session start remembers its transcript under its own key', async ($, o
 
 test('a reload lists the prompts again from the remembered transcript', async ($, on) => {
   // A reloaded module has no list; session.start fires again and rebuilds it.
-  world(on, { mode: 'horizontal', 'transcript:s1': { path: '/t/s1.jsonl', at: 1 } })
+  world(on, { 'transcript:s1': { path: '/t/s1.jsonl', at: 1 } })
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect((await band.findAll({ type: 'Button' })).length).toBe(8)
 })
@@ -245,8 +265,9 @@ test('a repeated prompt gets its own entry; the provisional row is not listed', 
 })
 
 test('a tool row at the top of the viewport places the reader under its prompt', async ($, on) => {
-  world(on, { mode: 'horizontal' })
+  world(on)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
   await $.ui.mount({
     plugin: 'turn-rail',
     surface: 'terminal',
@@ -297,8 +318,9 @@ test("while a subagent's transcript is in view the band stays empty", async ($, 
 // Twelve prompts, the one at `reading` on screen, in a horizontal band ten
 // cells wide: eight bars fit between the two elision marks.
 const overflowBand = async ($: any, on: any, reading: number) => {
-  world(on, { mode: 'horizontal' })
+  world(on)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
   for (let i = 0; i < 12; i++) {
     const onScreen = i === reading ? { first: 0, last: 1, of: 2 } : null
     await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: `p${i}`, props: prompt(`prompt ${i}`, onScreen) })
@@ -361,7 +383,7 @@ test('an unreachable prompt is drawn with a dotted tick and bar, unless being re
 })
 
 test('an unchanged transcript is not read again when a turn ends', async ($, on) => {
-  const disk: Disk = { transcript: TRANSCRIPT, mtimeMs: 1, reads: 0, invalidations: 0 }
+  const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   expect(disk.reads).toBe(1)
@@ -376,7 +398,7 @@ test('an unchanged transcript is not read again when a turn ends', async ($, on)
 })
 
 test('a turn that changes neither the list nor the prompt being read redraws nothing', async ($, on) => {
-  const disk: Disk = { transcript: TRANSCRIPT, mtimeMs: 1, reads: 0, invalidations: 0 }
+  const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await railLabels($)
@@ -390,8 +412,8 @@ test('a turn that changes neither the list nor the prompt being read redraws not
 })
 
 test('a scroll redraws only when the prompt being read changes', async ($, on) => {
-  const disk: Disk = { transcript: TRANSCRIPT, mtimeMs: 1, reads: 0, invalidations: 0 }
-  world(on, { mode: 'horizontal' }, TRANSCRIPT, disk)
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   const shown = { first: 0, last: 1, of: 2 }
   const u1 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u1', props: prompt('first stored prompt', shown) })
@@ -405,4 +427,37 @@ test('a scroll redraws only when the prompt being read changes', async ($, on) =
   await u1.redraw(prompt('first stored prompt', null))
   await u2.redraw(prompt('<div> why does this overflow?', shown))
   expect(disk.invalidations).toBe(before + 1)
+})
+
+test('/prompts <mode> writes the mode setting and switches at once', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  expect(disk.settings.get('turn-rail.mode')).toBe('horizontal')
+  expect(disk.panes.at(-1)).toBe('close turn-rail')
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.findAll({ type: 'Button' })).length).toBe(8)
+  await $.command.run({ command: 'prompts', args: 'vertical' })
+  expect(disk.settings.get('turn-rail.mode')).toBe('vertical')
+  expect(disk.panes.at(-1)).toBe('open turn-rail')
+})
+
+test('the mode no longer lives in the store: an earlier version\'s moves to the setting', async ($, on) => {
+  const disk = beneath()
+  const store = world(on, { mode: 'horizontal' }, TRANSCRIPT, disk)
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.settings.get('turn-rail.mode')).toBe('horizontal')
+  expect(store.has('mode')).toBe(false)
+  // The horizontal rail needs no pane; one left open by the previous module closes.
+  expect(disk.panes).toEqual(['close turn-rail'])
+})
+
+test('a session starts in the mode the setting holds, vertical by default', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.settings.size).toBe(0)
+  expect(disk.panes).toEqual(['open turn-rail'])
 })

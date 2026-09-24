@@ -24,7 +24,7 @@ Start a new session afterwards. The rail opens on its own when the session start
 
 ## Usage
 
-The rail has two modes, switched with the `/prompts` command. The chosen mode is remembered across sessions.
+The rail has two modes. The mode is the plugin's "Rail mode" setting, which `/config` lists as a picker, and `/prompts vertical` or `/prompts horizontal` is a shortcut that writes the same setting. Either way the change applies at once and is kept for later sessions, since Claude Code stores it under `pluginConfigs` in `~/.claude/settings.json`. A mode saved by an earlier version of the plugin moves into the setting the next time a session starts.
 
 `/prompts vertical` is the default. It docks a pane beside the transcript with one row per prompt, a tick and the prompt's first line. The row of the prompt you are reading is drawn bright with a thick tick. If you drag the pane narrower than 12 columns, the rows shrink to ticks and the hovered prompt's text appears above the prompt input instead.
 
