@@ -68,8 +68,9 @@ const drawPrompts = async ($: any, on: any) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({}))
   on('ui.toast', () => {})
-  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
-  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', { first: 0, last: 3, of: 4 }) })
+  const m1 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
+  const m2 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', { first: 0, last: 3, of: 4 }) })
+  return { m1, m2 }
 }
 
 test('a narrow vertical rail leaves the prompt text to hidden cards in the band', async ($, on) => {
@@ -154,6 +155,19 @@ test('the span runs from the topmost shown prompt through the bottommost', async
   const thumb = await band.find({ type: 'Raster' })
   // m2 and m3 show: the span covers the cells over both bars.
   expect(bgsOf(thumb)).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
+})
+
+test('a lone report from the top edge keeps the span over the prompts below', async ($, on) => {
+  const { m2 } = await drawPrompts($, on)
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
+  // Past the 150 ms pass window, only the top edge's row reports: a sparse
+  // pass proves nothing about the bottom edge, so its span is kept.
+  await new Promise(resolve => setTimeout(resolve, 200))
+  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
+  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
 })
 
 // A transcript JSONL from rows given in order; each row's parent is the one

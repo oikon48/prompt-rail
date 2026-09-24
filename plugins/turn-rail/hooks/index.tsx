@@ -449,26 +449,43 @@ export const register: Register = (on, options) => {
   // latest pass's shown rows, a reply or tool row counting as its prompt's.
   // A scroll reports the rows at the viewport's edges, a redraw every row, so
   // the shown rows of either bound the viewport. Each bound is kept while no
-  // known row shows.
+  // known row shows, and the bottom keeps until a pass reports its own prompt
+  // off the screen — a sparse pass may simply not carry the bottom edge's
+  // reports, so its greatest shown index is only a lower bound.
   const shownRange = () => {
     const promptIndex = new Map(entries.map((entry, i) => [entry.id, i]))
+    // Where a row counts on the rail: a prompt at its own index, a reply or
+    // tool row at its owner's, a row no prompt owns at the newest one's. A row
+    // the transcript read does not know was written after it: the Stop hook
+    // reads before the turn's last reply is stored, and a running turn's rows
+    // come later still, so only the newest turn can own one.
+    const indexOf = (id: string) => {
+      const ownerId = owners.get(id)
+      return promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
+    }
+    // A list that shrank under the saved bottom (a rewind) leaves it off the
+    // end: it is gone, not merely unproven.
+    if (lastBottom >= entries.length) lastBottom = -1
     let top = -1
     let bottom = -1
+    // The saved bottom's own row reported off the screen — the one sign a
+    // pass can give that the bottom edge moved up. A row further down being
+    // off the screen says nothing: it was never on it.
+    let bottomLeft = false
     for (const [id, isShown] of pass.rows) {
-      if (!isShown || id === PROVISIONAL_ID) continue
-      const ownerId = owners.get(id)
-      // A reply or tool row the transcript read does not know was written
-      // after it: the Stop hook reads before the turn's last reply is stored,
-      // and a running turn's rows come later still. A turn's start reads the
-      // file again, so only the newest turn can own it.
-      const i = promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
+      if (id === PROVISIONAL_ID) continue
+      const i = indexOf(id)
+      if (!isShown) {
+        if (i === lastBottom) bottomLeft = true
+        continue
+      }
       if (i === undefined) continue
       if (top < 0 || i < top) top = i
       if (bottom < 0 || i > bottom) bottom = i
     }
     if (top >= 0) {
       lastCurrent = top
-      lastBottom = bottom
+      lastBottom = bottomLeft ? bottom : Math.max(bottom, lastBottom)
     }
     const bound = (last: number) => (last >= 0 && last < entries.length ? last : -1)
     return [bound(lastCurrent), bound(lastBottom)] as const
@@ -478,14 +495,16 @@ export const register: Register = (on, options) => {
 
   // Record one onScreen report; true when it moved the span on screen — the
   // prompt being read or the viewport's bottom edge, the things a report can
-  // change in the drawing. A scroll that only reports the viewport's edges
-  // and lands on another prompt redraws, and that redraw's full pass of
-  // reports settles the prompt at the viewport's top.
+  // change in the drawing. The bottom edge only shows in the horizontal
+  // band's thumb row; elsewhere its moves are not worth a redraw. A scroll
+  // that only reports the viewport's edges and lands on another prompt
+  // redraws, and that redraw's full pass of reports settles the prompt at the
+  // viewport's top.
   const seeMoves = (id: string, isShown: boolean) => {
     const [beforeTop, beforeBottom] = shownRange()
     see(id, isShown)
     const [top, bottom] = shownRange()
-    return top !== beforeTop || bottom !== beforeBottom
+    return top !== beforeTop || (mode === 'horizontal' && bottom !== beforeBottom)
   }
 
   // A change of the setting reloads this module with the new value.
