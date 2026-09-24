@@ -2,8 +2,27 @@
   "name": "turn-rail",
   "version": "0.1.0",
   "description": "A rail of your session's prompts beside the transcript or above the prompt; hover to read one, click to jump to it.",
-  "author": { "name": "oikon48" },
+  "author": {
+    "name": "oikon48"
+  },
   "homepage": "https://github.com/oikon48/turn-rail",
   "repository": "https://github.com/oikon48/turn-rail",
-  "keywords": ["navigation", "transcript", "prompts", "function-hooks"]
+  "keywords": [
+    "navigation",
+    "transcript",
+    "prompts",
+    "function-hooks"
+  ],
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Rail mode",
+      "description": "vertical: a pane beside the transcript, one row per prompt. horizontal: a row of bars above the prompt input (terminal only). /turn-rail vertical|horizontal changes it too.",
+      "default": "vertical",
+      "options": [
+        "vertical",
+        "horizontal"
+      ]
+    }
+  }
 }

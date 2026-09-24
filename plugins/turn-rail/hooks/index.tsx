@@ -8,7 +8,12 @@ const RAIL_COLUMNS = 4
 // Below this many body columns the vertical rail has no room to reveal the
 // prompt beside a tick, so the band above the prompt shows it instead.
 const INLINE_REVEAL_MIN_COLUMNS = 12
-const MODE_KEY = 'mode'
+// Cells a hover card keeps for the prompt's text beside the turn's details.
+const MIN_CARD_TEXT = 12
+// The mode is the plugin's `mode` setting (userConfig), a row in /config. An
+// earlier version kept it in the store under this key, shared by every session.
+const LEGACY_MODE_KEY = 'mode'
+const MODE_SETTING = 'turn-rail.mode'
 // `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
 // session.start carries no path) can rebuild its list. One key per session, so
 // sessions starting together never rewrite each other's; the newest few stay.
@@ -26,6 +31,10 @@ const PASS_MS = 150
 // Cells kept left of the horizontal rail: off the window's edge, a pointer
 // leaving the first bar crosses a cell and the surface sees the hover end.
 const RAIL_INSET = 2
+// The engine's refusal when no row is drawn under an id, as for a slash
+// command's own row, which the transcript file holds but the surface skips.
+// Other refusals (a race with another move) pass, so they leave the tick be.
+const NOT_DRAWN = /nothing drawn/
 
 // vertical: ticks in a docked pane; horizontal: ticks in a row above the prompt.
 type Mode = 'vertical' | 'horizontal'
@@ -70,8 +79,88 @@ const oneLine = (text: string, width: number) => {
   return `${out}…`
 }
 
+// A stacked rail reads rows apart; a row of ticks needs upright bars to. A
+// dotted one marks a prompt the transcript does not draw, so a jump fails.
+export const tick = (isCurrent: boolean, isUnreachable = false) => (isCurrent ? '━' : isUnreachable ? '┄' : '─')
+export const bar = (isCurrent: boolean, isUnreachable = false) => (isCurrent ? '┃' : isUnreachable ? '┆' : '│')
+
+// Record what a jump to `id` answered: a landing makes it reachable, a refusal
+// for want of a drawn row unreachable, any other refusal says nothing. True
+// when the set changed.
+export const noteScroll = (unreachable: Set<string>, id: string, deny: string | undefined) => {
+  const was = unreachable.has(id)
+  if (deny === undefined) unreachable.delete(id)
+  else if (NOT_DRAWN.test(deny)) unreachable.add(id)
+  return unreachable.has(id) !== was
+}
+
+// The prompt one step from `current` in direction `dir`, passing over those
+// `isSkipped` names; from an unknown place (-1), the first or the last. -1
+// when there is none that way.
+export const stepFrom = (current: number, count: number, dir: 1 | -1, isSkipped: (i: number) => boolean) => {
+  let i = current >= 0 ? current + dir : dir > 0 ? 0 : count - 1
+  for (; i >= 0 && i < count; i += dir) if (!isSkipped(i)) return i
+  return -1
+}
+
+// What the transcript records of the turn a prompt started: how long it took
+// (`durationMs` as the engine reported it, else `spanMs` from the prompt to
+// the latest reply), how many tools it called, and the paths of the files it
+// edited (Edit and Write).
+export type Turn = { durationMs?: number; spanMs?: number; tools: number; files: string[] }
+
+// A duration as the rail shows it: `7s`, `1m 23s`, `1h 2m`.
+const duration = (ms: number) => {
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+}
+
+// The files a turn line names before it counts the rest.
+const NAMED_FILES = 3
+
+const EDITING_TOOLS = new Set(['Edit', 'Write'])
+const segments = (path: string) => path.split(/[\\/]/).filter(Boolean)
+
+// Each path by its file name, or by its folder and name where two share one.
+const fileNames = (paths: string[]) => {
+  const base = (path: string) => segments(path).at(-1) ?? path
+  return paths.map(path =>
+    paths.some(other => other !== path && base(other) === base(path)) ? segments(path).slice(-2).join('/') : base(path),
+  )
+}
+
+// A turn on one line: `1m 23s · 4 tools · app.ts, README.md`, each part left
+// out when the transcript has nothing for it; empty when it has nothing.
+// Given `maxCells`, it names fewer files (down to a count) to fit in them.
+export const turnLine = (turn: Turn | undefined, maxCells = Infinity) => {
+  if (!turn) return ''
+  const parts: string[] = []
+  const ms = turn.durationMs ?? turn.spanMs
+  if (ms !== undefined) parts.push(duration(ms))
+  if (turn.tools > 0) parts.push(`${turn.tools} ${turn.tools === 1 ? 'tool' : 'tools'}`)
+  const names = fileNames(turn.files)
+  const withFiles = (named: number) => {
+    if (names.length === 0) return parts.join(' · ')
+    const rest = names.length - named
+    const files =
+      named > 0
+        ? `${names.slice(0, named).join(', ')}${rest > 0 ? ` +${rest}` : ''}`
+        : `${names.length} ${names.length === 1 ? 'file' : 'files'}`
+    return [...parts, files].join(' · ')
+  }
+  for (let named = Math.min(NAMED_FILES, names.length); named > 0; named--) {
+    const line = withFiles(named)
+    if (cellWidth(line) <= maxCells) return line
+  }
+  return withFiles(0)
+}
+
 type TranscriptIndex = {
   prompts: Entry[]
+  // The turn each prompt started, in the same order.
+  turns: Turn[]
   // Reply row uuid or tool_use id -> index into prompts of the prompt it answers.
   owners: [string, number][]
   // Every row uuid the file holds, live branch or not.
@@ -112,15 +201,29 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
   const live = liveBranch(rows)
   const prompts: Entry[] = []
   const owners: [string, number][] = []
+  const turns: Turn[] = []
+  // When each turn started and when its latest reply was written.
+  const times: { start: number; last: number }[] = []
   for (const row of rows) {
     if (row.isSidechain || !live.has(row.uuid)) continue
+    const turn = turns[turns.length - 1]
+    if (row.type === 'system' && row.subtype === 'turn_duration' && typeof row.durationMs === 'number') {
+      if (turn) turn.durationMs = (turn.durationMs ?? 0) + row.durationMs
+      continue
+    }
     if (row.type === 'assistant') {
-      if (prompts.length === 0) continue
+      if (prompts.length === 0 || !turn) continue
       const owner = prompts.length - 1
       owners.push([row.uuid, owner])
+      const at = Date.parse(row.timestamp)
+      if (Number.isFinite(at)) times[owner]!.last = at
       const blocks = Array.isArray(row.message?.content) ? row.message.content : []
       for (const block of blocks) {
-        if (block?.type === 'tool_use' && typeof block.id === 'string') owners.push([block.id, owner])
+        if (block?.type !== 'tool_use' || typeof block.id !== 'string') continue
+        owners.push([block.id, owner])
+        turn.tools++
+        const path = block.input?.file_path
+        if (EDITING_TOOLS.has(block.name) && typeof path === 'string' && !turn.files.includes(path)) turn.files.push(path)
       }
       continue
     }
@@ -139,14 +242,30 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
     text = text.trim()
     if (!text || WRAPPER.test(text)) continue
     prompts.push({ id: row.uuid, text })
+    turns.push({ tools: 0, files: [] })
+    const at = Date.parse(row.timestamp)
+    times.push({ start: at, last: at })
   }
-  return { prompts, owners, known: new Set(rows.map(row => row.uuid)) }
+  turns.forEach((turn, i) => {
+    const time = times[i]
+    if (time && Number.isFinite(time.start) && time.last > time.start) turn.spanMs = time.last - time.start
+  })
+  return { prompts, turns, owners, known: new Set(rows.map(row => row.uuid)) }
 }
 
-// The transcript's index, or undefined before the file exists (a fresh session).
-async function readTranscript($: EngineInterface, transcriptPath: string) {
+// The size and modification time of the transcript as last read.
+type Seen = { path: string; size: number; mtimeMs: number }
+
+// The transcript's index, or undefined when it is as `seen` last read it (a
+// long session's file is not parsed again for a turn that wrote nothing) or
+// before the file exists (a fresh session). Records what it read in `seen`.
+async function readTranscript($: EngineInterface, transcriptPath: string, seen: Seen) {
   try {
-    return indexTranscript(await $.fs.read(transcriptPath))
+    const { size, mtimeMs } = await $.fs.stat(transcriptPath)
+    if (seen.path === transcriptPath && seen.size === size && seen.mtimeMs === mtimeMs) return undefined
+    const index = indexTranscript(await $.fs.read(transcriptPath))
+    Object.assign(seen, { path: transcriptPath, size, mtimeMs })
+    return index
   } catch {
     return undefined
   }
@@ -168,22 +287,55 @@ async function rememberTranscript($: EngineInterface, sessionId: string, transcr
   await Promise.all(dated.slice(KEPT_TRANSCRIPTS).map(({ key }) => $.store.delete(key)))
 }
 
+// Write the mode setting, as a change in /config would; say so if refused.
+async function writeMode($: EngineInterface, mode: Mode) {
+  const result = await $.config.set({ key: MODE_SETTING, value: mode })
+  if (result.deny) $.ui.toast(`turn-rail: the mode was not saved: ${result.deny}`)
+}
+
+// Scroll the transcript to a prompt's row, from a dispatch that answers the
+// person's own input (a press, a typed command): a transcript row moves only
+// then. Records whether the row could be reached.
+async function jumpTo($: EngineInterface, id: string, unreachable: Set<string>) {
+  try {
+    const result = await $.ui.scroll({ to: { requestId: id }, block: 'start' })
+    if (result.deny) $.ui.toast(`turn-rail: ${result.deny}`)
+    if (noteScroll(unreachable, id, result.deny)) $.ui.invalidate('ui.render')
+  } catch (err) {
+    $.ui.toast(`turn-rail: ${(err as Error).message}`)
+  }
+}
+
 // The transcript path remembered for this session, if any.
 async function rememberedTranscript($: EngineInterface) {
   const value = (await $.store.get(`${TRANSCRIPT_KEY_PREFIX}${await $.session.id()}`)) as { path?: unknown } | undefined
   return typeof value?.path === 'string' ? value.path : undefined
 }
 
-export const register: Register = (on) => {
+export const register: Register = (on, options) => {
   let entries: Entry[] = []
   // Assistant row uuid -> the prompt it answers, from the transcript.
   let owners = new Map<string, string>()
-  // Which transcript rows (prompts and replies) the viewport shows, by id, as
-  // last reported. A row that left the viewport away from its edges may keep a
-  // stale `true` here, so the current prompt is read from the latest pass alone.
-  const onScreen = new Map<string, boolean>()
+  // Prompt id -> the turn it started, from the transcript.
+  let turns = new Map<string, Turn>()
+  // Prompt id -> how long its turns took as the engine reported them on
+  // ending, for a turn whose turn_duration row the transcript lacks yet.
+  const reported = new Map<string, number>()
+  // A prompt's turn as the rail shows it.
+  const turnOf = (id: string): Turn | undefined => {
+    const turn = turns.get(id)
+    const ms = reported.get(id)
+    if (ms === undefined || turn?.durationMs !== undefined) return turn
+    return { tools: 0, files: [], ...turn, durationMs: ms }
+  }
+  // The latest pass of onScreen reports: which transcript rows (prompts,
+  // replies, tool rows) it said the viewport shows, by id. Only this pass is
+  // read, since a row that left away from the viewport's edges is not told.
   let pass = { at: 0, rows: new Map<string, boolean>() }
   let lastCurrent = -1
+  // Prompts whose rows the surface does not draw, learnt from a refused jump.
+  const unreachable = new Set<string>()
+  const seen: Seen = { path: '', size: -1, mtimeMs: -1 }
 
   const addPrompt = (id: string, text: string) => {
     // A new prompt is drawn under a provisional id before it is stored, then
@@ -194,15 +346,12 @@ export const register: Register = (on) => {
     return true
   }
 
-  // Record one onScreen report; true when it changed what is known.
+  // Record one onScreen report into the current pass.
   const see = (id: string, isShown: boolean) => {
     const now = Date.now()
     if (now - pass.at > PASS_MS) pass = { at: now, rows: new Map() }
     pass.at = now
     pass.rows.set(id, isShown)
-    if (onScreen.get(id) === isShown) return false
-    onScreen.set(id, isShown)
-    return true
   }
 
   // Where the person is reading: the prompt that the topmost row of the latest
@@ -222,85 +371,139 @@ export const register: Register = (on) => {
     return lastCurrent < entries.length ? lastCurrent : -1
   }
 
-  let mode: Mode = 'vertical'
+  // Record one onScreen report; true when it moved the prompt being read, the
+  // one thing a report changes in the drawing. A scroll that only reports the
+  // viewport's edges and lands on another prompt redraws, and that redraw's
+  // full pass of reports settles the prompt at the viewport's top.
+  const seeMoves = (id: string, isShown: boolean) => {
+    const before = currentIndex()
+    see(id, isShown)
+    return currentIndex() !== before
+  }
+
+  // A change of the setting reloads this module with the new value.
+  let mode: Mode = isMode(options.mode) ? options.mode : 'vertical'
+  // The subagent whose transcript is in view, as the rail's sites last drew;
+  // undefined for the main conversation, whose rows alone the rail lists.
+  let viewAgent: string | undefined
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
   let railColumns = 0
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'prompts',
-      description: 'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt).',
-      argumentHint: '[vertical|horizontal]',
+      // Named after the plugin: a plugin's commands share one namespace with
+      // every other plugin's and the built-ins, so a generic name would collide.
+      name: 'turn-rail',
+      description:
+        'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt); next or prev jumps to the next or previous prompt.',
+      argumentHint: '[vertical|horizontal|next|prev]',
+      // Runs while a turn streams, so next and prev move through it then too.
+      immediate: true,
     })
-    const stored = await $.store.get(MODE_KEY)
-    if (isMode(stored)) mode = stored
     isTerminal = e.surface === 'terminal'
+    // Move a mode an earlier version stored into the setting, once. Writing
+    // the setting reloads this module, so everything after it is best effort.
+    const stored = await $.store.get(LEGACY_MODE_KEY)
+    if (stored !== undefined) await $.store.delete(LEGACY_MODE_KEY)
+    if (isMode(stored) && stored !== mode) {
+      mode = stored
+      await writeMode($, mode)
+    }
     // Also fired after a hot reload, when the list starts empty: rebuild it from
     // the transcript this session's classic SessionStart remembered.
     const transcriptPath = await rememberedTranscript($)
-    const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath)
-    if (index) {
-      merge(index)
-      $.ui.invalidate('ui.render')
-    }
+    const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen)
+    if (index && merge(index)) $.ui.invalidate('ui.render')
     // Unasked, the engine seats a pane only from 144 columns (110 once the
-    // person has opened it with /prompts); below that it waits undrawn.
+    // person has opened it with /turn-rail); below that it waits undrawn.
     if (mode === 'vertical' || !isTerminal) await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
+    else await $.ui.close({ id: PANE })
     return next(e)
   })
 
-  on('command.run', { command: 'prompts' }, async ($, e) => {
+  on('command.run', { command: 'turn-rail' }, async ($, e) => {
     const asked = e.args.trim()
-    if (asked && !isMode(asked)) {
-      $.ui.toast('turn-rail: /prompts [vertical|horizontal]')
+    if (asked === 'next' || asked === 'prev') {
+      // The main conversation's rows are not drawn beside a subagent's, so a
+      // jump would be refused and wrongly dot a prompt that can be reached.
+      if (viewAgent !== undefined) {
+        $.ui.toast('turn-rail: next and prev move through the main conversation; switch back to it first')
+        return {}
+      }
+      const target = stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)
+      const entry = entries[target]
+      if (entry) await jumpTo($, entry.id, unreachable)
+      else $.ui.toast(`turn-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
       return {}
     }
-    if (isMode(asked)) {
-      mode = asked
-      await $.store.set(MODE_KEY, mode)
+    if (asked && !isMode(asked)) {
+      $.ui.toast('turn-rail: /turn-rail [vertical|horizontal|next|prev]')
+      return {}
     }
+    if (isMode(asked)) mode = asked
     if (mode === 'horizontal' && isTerminal) {
       await $.ui.close({ id: PANE })
     } else {
       await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
     }
     $.ui.invalidate('ui.render')
+    // Last: a changed setting reloads this module, which then starts in it.
+    if (isMode(asked)) await writeMode($, asked)
     return {}
   })
 
   // Rebuild the list from the transcript file, whose uuids are the ids the
   // transcript rows are drawn under. A resumed session so lists prompts the
   // surface has not drawn yet; a row drawn but not stored yet stays after them,
-  // and one the file holds off the live branch (rewound away) drops out.
+  // and one the file holds off the live branch (rewound away) drops out. True
+  // when the list or the prompt being read changed, so the rail needs a redraw.
   const merge = (index: TranscriptIndex) => {
+    // A turn's details count as the list's: a turn that ends changes its card.
+    const listed = (list: Entry[]) => list.map(entry => `${entry.id}\u0000${entry.text}\u0000${turnLine(turnOf(entry.id))}`).join('\u0001')
+    const before = { list: listed(entries), current: currentIndex() }
     entries = [...index.prompts, ...entries.filter(entry => !index.known.has(entry.id))]
     owners = new Map(index.owners.map(([id, i]) => [id, index.prompts[i]?.id ?? '']))
+    turns = new Map(index.prompts.map((entry, i) => [entry.id, index.turns[i] ?? { tools: 0, files: [] }]))
+    return listed(entries) !== before.list || currentIndex() !== before.current
   }
 
   on('classic.SessionStart', async ($, e, next) => {
     if (e.source === 'clear') {
       entries = []
       owners = new Map()
-      onScreen.clear()
+      turns = new Map()
+      reported.clear()
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
+      unreachable.clear()
+      Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
+      $.ui.invalidate('ui.render')
     } else {
-      const index = await readTranscript($, e.transcript_path)
-      if (index) merge(index)
+      const index = await readTranscript($, e.transcript_path, seen)
+      if (index && merge(index)) $.ui.invalidate('ui.render')
     }
     await rememberTranscript($, e.session_id, e.transcript_path)
-    $.ui.invalidate('ui.render')
     return next(e)
   })
 
   on('classic.Stop', async ($, e, next) => {
-    const index = await readTranscript($, e.transcript_path)
-    if (index) {
-      merge(index)
-      $.ui.invalidate('ui.render')
-    }
+    const index = await readTranscript($, e.transcript_path, seen)
+    if (index && merge(index)) $.ui.invalidate('ui.render')
     return next(e)
+  })
+
+  // A main-loop turn ended: its prompt is the newest. The transcript's
+  // turn_duration row is written after the Stop hook reads the file, so keep
+  // the engine's figure until a later read has the row.
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    const entry = entries[entries.length - 1]
+    if (e.agentId === undefined && entry) {
+      reported.set(entry.id, (reported.get(entry.id) ?? 0) + e.durationMs)
+      if (turns.get(entry.id)?.durationMs === undefined) $.ui.invalidate('ui.render')
+    }
+    return result
   })
 
   // Record every prompt row as it is drawn, and which rows the viewport shows.
@@ -308,7 +511,7 @@ export const register: Register = (on) => {
     // A slash command's row is drawn as a user row too; it is not a prompt.
     if (PROMPT_KINDS.has(e.props.origin.kind) && !e.props.text.trimStart().startsWith('/')) {
       const isAdded = addPrompt(e.requestId, e.props.text)
-      const isMoved = e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)
+      const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
       if (isAdded || isMoved) $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -318,30 +521,38 @@ export const register: Register = (on) => {
   // answers. Tool rows are drawn under their tool_use id; a collapsed group
   // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && see(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
-    if (id && e.props.onScreen !== undefined && see(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
 
-  // A stacked rail reads rows apart; a row of ticks needs upright bars to.
-  const tick = (isCurrent: boolean) => (isCurrent ? '━' : '─')
-  const bar = (isCurrent: boolean) => (isCurrent ? '┃' : '│')
+  const isUnreachable = (i: number) => unreachable.has(entries[i]?.id ?? '')
+
+  // A prompt's text and its turn's details on one line `width` cells wide: the
+  // text is cut first, down to a few words, then the details name fewer files.
+  const withTurn = (entry: Entry, width: number) => {
+    const details = turnLine(turnOf(entry.id), width - MIN_CARD_TEXT - ' · '.length)
+    if (!details) return oneLine(entry.text, width)
+    const room = Math.max(MIN_CARD_TEXT, width - cellWidth(details) - ' · '.length)
+    return `${oneLine(entry.text, room)} · ${details}`
+  }
 
   on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
+    viewAgent = e.props.view.agentId
     const nextColumns = isRail ? e.props.bodyColumns : 0
     if (nextColumns !== railColumns) {
       // The band decides from this whether it carries the cards.
@@ -358,6 +569,10 @@ export const register: Register = (on) => {
       return <Text dimColor>{isRail ? '·' : 'No prompts yet'}</Text>
     }
     const current = currentIndex()
+    // While the pane holds the keyboard, 1 to 9 jump to the first nine prompts.
+    // The surface draws such a row as `1: label`, three cells the label gives up.
+    const isKeyed = (i: number) => e.props.isFocused && i < 9
+    const hotkey = (i: number) => (isKeyed(i) ? { hotkey: String(i + 1) } : {})
     // Docked on the terminal: one row per prompt, its tick and its text, the
     // whole row pressable. Too narrow for text, ticks alone (the band shows it).
     if (isRail) {
@@ -369,8 +584,17 @@ export const register: Register = (on) => {
             <Button
               key={`jump-${i}`}
               plain
+              {...hotkey(i)}
               dimColor={i !== current}
-              label={hasRoom ? ` ${tick(i === current)} ${oneLine(entry.text, width)}` : ` ${tick(i === current)} `}
+              label={
+                isKeyed(i)
+                  ? hasRoom
+                    ? `${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width - 2)}`
+                    : tick(i === current, isUnreachable(i))
+                  : hasRoom
+                    ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`
+                    : ` ${tick(i === current, isUnreachable(i))} `
+              }
               hover={{ scope: `turn-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
             />
@@ -386,8 +610,9 @@ export const register: Register = (on) => {
           <Button
             key={`jump-${i}`}
             plain
+            {...hotkey(i)}
             dimColor={i !== current}
-            label={`${tick(i === current)} ${oneLine(entry.text, width)}`}
+            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
             onPress={() => {}}
           />
         ))}
@@ -399,6 +624,7 @@ export const register: Register = (on) => {
   // row of ticks with the hovered prompt beside them. Vertical with a dock too
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    viewAgent = e.props.view.agentId
     // Nothing while a survey holds the band or a subagent's transcript is in view.
     if (e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -406,7 +632,7 @@ export const register: Register = (on) => {
       entries.map((entry, i) => (
         <Box key={`card-${i}`} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
           <Text dimColor>{`#${i + 1} `}</Text>
-          <Text wrap="truncate-end">{oneLine(entry.text, width)}</Text>
+          <Text wrap="truncate-end">{withTurn(entry, width)}</Text>
         </Box>
       ))
 
@@ -426,6 +652,11 @@ export const register: Register = (on) => {
       const shown = entries.slice(first, first + capacity)
       const hidesAfter = first + capacity < entries.length
       const label = (i: number) => `#${i + 1} ${oneLine(entries[i]?.text ?? '', width - `#${i + 1} `.length)}`
+      // The hovered prompt's card also sums up its turn.
+      const card = (i: number) => {
+        const entry = entries[i]
+        return entry ? `#${i + 1} ${withTurn(entry, width - `#${i + 1} `.length)}` : ''
+      }
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
           <Text> </Text>
@@ -435,7 +666,7 @@ export const register: Register = (on) => {
               {shown.map((entry, offset) => {
                 const i = first + offset
                 // An empty upper cell turns solid under the hover's inverse.
-                const glyph = row === 'lower' ? bar(i === current) : i === current ? '┃' : ' '
+                const glyph = row === 'lower' ? bar(i === current, isUnreachable(i)) : i === current ? '┃' : ' '
                 return (
                   <Button
                     key={row === 'lower' ? `jump-${i}` : `jump-${i}-upper`}
@@ -454,7 +685,7 @@ export const register: Register = (on) => {
             <Text dimColor wrap="truncate-end">{current >= 0 ? label(current) : ' '}</Text>
             {entries.map((_, i) => (
               <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
-                <Text wrap="truncate-end">{padTo(label(i), width)}</Text>
+                <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
               </Box>
             ))}
           </Box>
@@ -468,18 +699,11 @@ export const register: Register = (on) => {
     return next(e)
   })
 
-  // Scroll from the press dispatch itself: a transcript row moves only while
-  // the call answers the person's own input.
+  // Scroll from the press dispatch itself (a click or a hotkey).
   on('ui.press', { plugin: 'turn-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
     const entry = entries[index]
-    if (!entry) return next(e)
-    try {
-      const result = await $.ui.scroll({ to: { requestId: entry.id }, block: 'start' })
-      if (result.deny) $.ui.toast(`turn-rail: ${result.deny}`)
-    } catch (err) {
-      $.ui.toast(`turn-rail: ${(err as Error).message}`)
-    }
+    if (entry) await jumpTo($, entry.id, unreachable)
     return next(e)
   })
 }
