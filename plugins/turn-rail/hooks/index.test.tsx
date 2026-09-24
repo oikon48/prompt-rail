@@ -108,6 +108,29 @@ test('/turn-rail horizontal draws bars over a text line, tall only where being r
   expect((await band.press({ key: 'jump-0-upper' }))?.element).toBe('jump-0-upper')
 })
 
+test('the horizontal band keeps the focus ring off its bars', async ($, on) => {
+  const moves: (string | undefined)[] = []
+  // Stand in for the engine moving the ring.
+  on('ui.focus', ($: any, e: any) => {
+    moves.push(e.element)
+    return {}
+  })
+  await drawPrompts($, on)
+  const focus = (component: 'AbovePrompt' | 'Pane', plugin: string, element: string) =>
+    $.ui.focus({ component, requestId: component === 'Pane' ? 'turn-rail' : 'above-prompt', plugin, element, origin: { kind: 'person' } })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  // A lit bar left behind after a click reads as a stuck hover, so the ring
+  // stays where it was; a press still jumps.
+  expect((await focus('AbovePrompt', 'turn-rail', 'jump-0-upper')).deny).toBeDefined()
+  expect((await focus('AbovePrompt', 'turn-rail', 'jump-1')).deny).toBeDefined()
+  expect(moves).toEqual([])
+  // Another plugin's element in the band, and the vertical pane's rows, move it.
+  await focus('AbovePrompt', 'survey', 'yes')
+  await $.command.run({ command: 'turn-rail', args: 'vertical' })
+  await focus('Pane', 'turn-rail', 'jump-0')
+  expect(moves).toEqual(['yes', 'jump-0'])
+})
+
 test('with several prompts on screen only the topmost one stands tall', async ($, on) => {
   await drawPrompts($, on)
   await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })

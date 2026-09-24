@@ -846,6 +846,15 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // The band holds the keyboard after a click or ctrl+x tab, and a ring on a
+  // bar stays lit until Escape, which reads as a hover that will not clear.
+  // Keep the ring off the horizontal rail's bars; a click still presses, and
+  // /turn-rail next and prev are its keyboard route.
+  on('ui.focus', { component: 'AbovePrompt', plugin: 'turn-rail' }, async ($, e, next) => {
+    if (mode === 'horizontal') return { deny: 'turn-rail: the rail takes clicks, not the focus ring' }
+    return next(e)
+  })
+
   // Scroll from the press dispatch itself (a click or a hotkey).
   on('ui.press', { plugin: 'turn-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
