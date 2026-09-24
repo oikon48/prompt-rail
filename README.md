@@ -13,6 +13,29 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
 
 </div>
 
+## Quick start
+
+1. Turn on function hooks (early access, Claude Code 2.1.280 or newer) by adding the flag to `~/.claude/settings.json`:
+
+   ```json
+   {
+     "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" }
+   }
+   ```
+
+2. Add the marketplace and install the plugin:
+
+   ```bash
+   claude plugin marketplace add oikon48/turn-rail
+   claude plugin install turn-rail@oikon48
+   ```
+
+3. Start a new session. The rail opens on its own.
+
+Clicking and hovering work best in the fullscreen terminal layout (`"tui": "fullscreen"` in the same file), where the terminal reports the mouse. While this repository is private, adding the marketplace needs git access to it, through an SSH key or `gh auth login`.
+
+## Why
+
 Long Claude Code sessions bury your own prompts under replies, diffs and tool output. Scrolling back to find "the prompt where I asked for the tests" means reading the whole transcript again. turn-rail keeps one tick per prompt on screen, shows what each one asked and what its turn did, and scrolls the transcript straight to it when you click.
 
 ## Features
@@ -23,27 +46,6 @@ Long Claude Code sessions bury your own prompts under replies, diffs and tool ou
 - Two layouts: a docked pane beside the transcript, or a compact bar above the prompt input. Either can be turned off.
 - It follows the live branch of the conversation, so prompts abandoned with `/rewind` drop out of the rail.
 - `/turn-rail next` and `/turn-rail prev` step through prompts from the keyboard, even while a turn is streaming.
-
-## Quick start
-
-You need Claude Code 2.1.280 or newer with function hooks turned on. Function hooks (Mods) are early access, so set the flag in your environment or in the `env` block of `~/.claude/settings.json`:
-
-```json
-{
-  "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" }
-}
-```
-
-Then add the marketplace and install the plugin:
-
-```bash
-claude plugin marketplace add oikon48/turn-rail
-claude plugin install turn-rail@oikon48
-```
-
-Start a new session and the rail opens on its own. Clicking and hovering work best in the fullscreen terminal layout (`"tui": "fullscreen"`), where the terminal reports the mouse and Claude Code owns the transcript's scrolling.
-
-The repository doubles as the `oikon48` marketplace. While it is private, adding the marketplace needs git access to it, through an SSH key or `gh auth login`.
 
 ## Usage
 
