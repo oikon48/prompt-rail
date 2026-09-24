@@ -314,15 +314,14 @@ async function rememberTranscript($: EngineInterface, sessionId: string, transcr
   await Promise.all(dated.slice(KEPT_TRANSCRIPTS).map(({ key }) => $.store.delete(key)))
 }
 
-// Open the pane where the mode draws the rail in it and answer whether it is
-// placed; close it elsewhere (off, or horizontal on the terminal, where the
-// band carries the rail) and answer undefined.
+// Open the pane where the mode draws the rail in it; close it elsewhere (off,
+// or horizontal on the terminal, where the band carries the rail).
 async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
   if (mode === 'off' || (mode === 'horizontal' && isTerminal)) {
     await $.ui.close({ id: PANE })
-    return undefined
+  } else {
+    await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
   }
-  return (await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })).isPlaced
 }
 
 // Write the mode setting, as a change in /config would; say so if refused.
@@ -342,13 +341,6 @@ async function jumpTo($: EngineInterface, id: string, unreachable: Set<string>) 
   } catch (err) {
     $.ui.toast(`turn-rail: ${(err as Error).message}`)
   }
-}
-
-// Pin the position as this plugin's status line, or clear it, when it changed.
-function pinStatus($: EngineInterface, text: string | undefined, pinned: { text?: string }) {
-  if (pinned.text === text) return
-  pinned.text = text
-  $.ui.status(text)
 }
 
 // The transcript path remembered for this session, if any.
@@ -454,18 +446,6 @@ export const register: Register = (on, options) => {
   // The subagent whose transcript is in view, as the rail's sites last drew;
   // undefined for the main conversation, whose rows alone the rail lists.
   let viewAgent: string | undefined
-  // Whether the pane is drawn: opened and placed, or drawing now; undefined
-  // until the session's first open answers, so nothing flickers before it.
-  let paneShown: boolean | undefined
-  const pinned: { text?: string } = {}
-  // Where neither the pane nor the band shows the rail (a pane waiting for
-  // room on a narrow terminal, or one the person closed), the status line
-  // carries the position: `#3/12`, `#–/12` while no prompt is known on screen.
-  const statusText = () => {
-    if (mode === 'off' || (mode === 'horizontal' && isTerminal) || paneShown !== false || viewAgent !== undefined || entries.length === 0) return undefined
-    const current = currentIndex()
-    return `#${current >= 0 ? current + 1 : '–'}/${entries.length}`
-  }
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
   let railColumns = 0
@@ -498,9 +478,7 @@ export const register: Register = (on, options) => {
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /turn-rail); below that it waits undrawn.
-    const placed = await seatRail($, mode, isTerminal)
-    if (placed !== undefined) paneShown = placed
-    pinStatus($, statusText(), pinned)
+    await seatRail($, mode, isTerminal)
     return next(e)
   })
 
@@ -529,10 +507,8 @@ export const register: Register = (on, options) => {
       return {}
     }
     if (isMode(asked)) mode = asked
-    const placed = await seatRail($, mode, isTerminal)
-    if (placed !== undefined) paneShown = placed
+    await seatRail($, mode, isTerminal)
     $.ui.invalidate('ui.render')
-    pinStatus($, statusText(), pinned)
     // Last: a changed setting reloads this module, which then starts in it.
     if (isMode(asked)) await writeMode($, asked)
     return {}
@@ -571,7 +547,6 @@ export const register: Register = (on, options) => {
       if (index && merge(index)) $.ui.invalidate('ui.render')
     }
     listedAtRest = entries.length
-    pinStatus($, statusText(), pinned)
     await rememberTranscript($, e.session_id, e.transcript_path)
     return next(e)
   })
@@ -579,17 +554,7 @@ export const register: Register = (on, options) => {
   on('classic.Stop', async ($, e, next) => {
     const index = await readTranscript($, e.transcript_path, seen)
     if (index && merge(index)) $.ui.invalidate('ui.render')
-    pinStatus($, statusText(), pinned)
     return next(e)
-  })
-
-  // The pane closed, by this plugin or by the person: the status line takes
-  // over while the rail is vertical.
-  on('ui.close', { id: PANE }, async ($, e, next) => {
-    const result = await next(e)
-    paneShown = false
-    pinStatus($, statusText(), pinned)
-    return result
   })
 
   // A main-loop turn starts (a subagent's run raises none): the newest
@@ -630,10 +595,7 @@ export const register: Register = (on, options) => {
     if (PROMPT_KINDS.has(e.props.origin.kind) && !e.props.text.trimStart().startsWith('/')) {
       const isAdded = addPrompt(e.requestId, e.props.text)
       const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
-      if (isAdded || isMoved) {
-        $.ui.invalidate('ui.render')
-        pinStatus($, statusText(), pinned)
-      }
+      if (isAdded || isMoved) $.ui.invalidate('ui.render')
     }
     return next(e)
   })
@@ -642,32 +604,20 @@ export const register: Register = (on, options) => {
   // answers. Tool rows are drawn under their tool_use id; a collapsed group
   // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
-    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) {
-      $.ui.invalidate('ui.render')
-      pinStatus($, statusText(), pinned)
-    }
+    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
     return next(e)
   })
 
@@ -686,8 +636,6 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
     viewAgent = e.props.view.agentId
-    paneShown = true
-    pinStatus($, statusText(), pinned)
     const nextColumns = isRail ? e.props.bodyColumns : 0
     if (nextColumns !== railColumns) {
       // The band decides from this whether it carries the cards.
@@ -776,7 +724,6 @@ export const register: Register = (on, options) => {
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
     viewAgent = e.props.view.agentId
-    pinStatus($, statusText(), pinned)
     // Nothing while the rail is off, a survey holds the band or a subagent's transcript is in view.
     if (mode === 'off' || e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)

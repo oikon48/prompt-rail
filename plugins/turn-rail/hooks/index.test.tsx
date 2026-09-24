@@ -857,41 +857,18 @@ test('the horizontal rail marks each bar in the row above it', async ($, on) => 
   expect(marks.map((t: any) => [t.text, t.props.color])).toEqual([['×', 'error'], ['×', 'error'], ['•', 'success']])
 })
 
-test('where the pane waits undrawn, the status line shows the position', async ($, on) => {
+// The status line belongs to the person: the rail pins nothing there, even
+// where neither the pane nor the band shows it.
+test('the rail never pins a status line', async ($, on) => {
   const disk = { ...beneath(), placed: false }
   world(on, {}, TRANSCRIPT, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u3', props: prompt('continue', { first: 0, last: 1, of: 2 }) })
-  expect(disk.status.at(-1)).toBe('#3/4')
-  // Once the pane is drawn it shows the position itself.
-  const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: pane('dock', 40) })
-  expect(disk.status.at(-1)).toBeUndefined()
-  await rail.unmount()
-})
-
-// The kit raises no person's close of a pane; that path is checked live.
-test('a pane that can no longer be drawn brings the position back to the status line', async ($, on) => {
-  const disk = beneath()
-  world(on, {}, TRANSCRIPT, disk)
-  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.status).toEqual([])
-  // The terminal narrows; the pane closed for the band waits undrawn when reopened.
-  disk.placed = false
   await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   await $.command.run({ command: 'turn-rail', args: 'vertical' })
-  expect(disk.status.at(-1)).toBe('#–/4')
-})
-
-test('the horizontal band needs no status line', async ($, on) => {
-  const disk = { ...beneath(), placed: false }
-  world(on, {}, TRANSCRIPT, disk)
-  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.status.at(-1)).toBe('#–/4')
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  expect(disk.status.at(-1)).toBeUndefined()
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
+  expect(disk.status).toEqual([])
 })
 
 test('a reply the transcript read has not seen yet counts as the newest prompt\'s', async ($, on) => {

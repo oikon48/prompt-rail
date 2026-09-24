@@ -40,7 +40,7 @@ A prompt whose click the engine refused because its row is not drawn in the tran
 
 `/turn-rail next` and `/turn-rail prev` scroll the transcript to the prompt after or before the one you are reading, passing over prompts with a dotted tick. They run at once even while a turn is streaming. While the vertical pane has the keyboard (ctrl+x tab, or Tab onto it), its first nine rows show `1:` to `9:` in front of the tick, and pressing that digit jumps to the prompt. Esc gives the keyboard back to the prompt input. Claude Code does not let a plugin define keybindings of its own, so these commands and the pane's digits are the keyboard routes.
 
-When the vertical pane is not on screen, because the terminal is too narrow to seat it or because you closed it, the status line under the prompt input shows where you are instead, as `#3/12` (`#–/12` until a prompt is known to be on screen). It clears once the pane is drawn again, and the horizontal rail needs no status line.
+On a terminal too narrow to seat the vertical pane, the pane waits undrawn until there is room. `/turn-rail horizontal` shows the rail above the prompt input instead. The plugin leaves the status line to you and draws nothing there.
 
 Running `/turn-rail` with no argument reopens the rail in the current mode. While the rail is off it opens nothing and says which command turns it on. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
 
