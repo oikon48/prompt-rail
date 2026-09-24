@@ -642,3 +642,74 @@ test('a turn that just ended shows the duration the engine reported before the t
   // The turn_duration row the transcript records wins where it has one.
   expect(await band.find({ type: 'Text', text: /^#1 first · 1m 23s · 4 tools · app\.ts, README\.md\s*$/ })).toBeDefined()
 })
+
+test('next and prev wait while a subagent transcript is in view', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  const sub = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: { ...pane('dock', 40), view: { agentId: 'ag1' } } })
+  await $.command.run({ command: 'turn-rail', args: 'next' })
+  // No jump is tried there, so no refusal can dot a main-conversation prompt.
+  expect(disk.toasts).toEqual(['turn-rail: next and prev move through the main conversation; switch back to it first'])
+  await sub.unmount()
+  expect((await railLabels($)).length).toBe(4)
+  const main = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await main.unmount()
+  await $.command.run({ command: 'turn-rail', args: 'prev' })
+  expect(disk.toasts.filter(text => text.includes('switch back'))).toHaveLength(1)
+})
+
+test('files that share a name are told apart by their folder', async ($, on) => {
+  expect(turnLine({ tools: 2, files: ['/p/web/index.ts', '/p/api/index.ts', '/p/README.md'] })).toBe('2 tools · web/index.ts, api/index.ts, README.md')
+  world(on, {}, jsonl([
+    { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } },
+    {
+      type: 'assistant',
+      uuid: 'a1',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/p/web/index.ts' } },
+          { type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: '/p/api/index.ts' } },
+          { type: 'tool_use', id: 't3', name: 'Edit', input: { file_path: '/p/api/index.ts' } },
+        ],
+      },
+    },
+  ]))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first · 3 tools · web\/index\.ts, api\/index\.ts\s*$/ })).toBeDefined()
+})
+
+test('a turn line too long for its room names fewer files and keeps the count', () => {
+  const turn = { durationMs: 9000, tools: 3, files: ['/w/alpha.ts', '/w/beta.ts', '/w/gamma.ts'] }
+  expect(turnLine(turn)).toBe('9s · 3 tools · alpha.ts, beta.ts, gamma.ts')
+  expect(turnLine(turn, 26)).toBe('9s · 3 tools · alpha.ts +2')
+  expect(turnLine(turn, 25)).toBe('9s · 3 tools · 3 files')
+})
+
+test('a long turn summary keeps its end in the card', async ($, on) => {
+  world(on, {}, jsonl([
+    { type: 'user', uuid: 'u1', message: { role: 'user', content: 'a prompt that is long enough to be cut in the card' } },
+    {
+      type: 'assistant',
+      uuid: 'a1',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/w/a-long-file-name.ts' } },
+          { type: 'tool_use', id: 't2', name: 'Write', input: { file_path: '/w/another-long-name.ts' } },
+        ],
+      },
+    },
+    { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 9000 },
+  ]))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 50 } })
+  // Forty-six cells: the file count stays whole at the end.
+  const card = await band.find({ type: 'Text', text: /· 9s · 2 tools · 2 files\s*$/ })
+  expect(card).toBeDefined()
+  expect(String(card?.text).trimEnd().length).toBeLessThanOrEqual(46)
+})

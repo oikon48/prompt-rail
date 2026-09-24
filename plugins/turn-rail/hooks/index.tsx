@@ -105,8 +105,8 @@ export const stepFrom = (current: number, count: number, dir: 1 | -1, isSkipped:
 
 // What the transcript records of the turn a prompt started: how long it took
 // (`durationMs` as the engine reported it, else `spanMs` from the prompt to
-// the latest reply), how many tools it called, and the files it edited (Edit
-// and Write), by name.
+// the latest reply), how many tools it called, and the paths of the files it
+// edited (Edit and Write).
 export type Turn = { durationMs?: number; spanMs?: number; tools: number; files: string[] }
 
 // A duration as the rail shows it: `7s`, `1m 23s`, `1h 2m`.
@@ -120,23 +120,42 @@ const duration = (ms: number) => {
 // The files a turn line names before it counts the rest.
 const NAMED_FILES = 3
 
+const EDITING_TOOLS = new Set(['Edit', 'Write'])
+const segments = (path: string) => path.split(/[\\/]/).filter(Boolean)
+
+// Each path by its file name, or by its folder and name where two share one.
+const fileNames = (paths: string[]) => {
+  const base = (path: string) => segments(path).at(-1) ?? path
+  return paths.map(path =>
+    paths.some(other => other !== path && base(other) === base(path)) ? segments(path).slice(-2).join('/') : base(path),
+  )
+}
+
 // A turn on one line: `1m 23s · 4 tools · app.ts, README.md`, each part left
 // out when the transcript has nothing for it; empty when it has nothing.
-export const turnLine = (turn: Turn | undefined) => {
+// Given `maxCells`, it names fewer files (down to a count) to fit in them.
+export const turnLine = (turn: Turn | undefined, maxCells = Infinity) => {
   if (!turn) return ''
   const parts: string[] = []
   const ms = turn.durationMs ?? turn.spanMs
   if (ms !== undefined) parts.push(duration(ms))
   if (turn.tools > 0) parts.push(`${turn.tools} ${turn.tools === 1 ? 'tool' : 'tools'}`)
-  if (turn.files.length > 0) {
-    const rest = turn.files.length - NAMED_FILES
-    parts.push(`${turn.files.slice(0, NAMED_FILES).join(', ')}${rest > 0 ? ` +${rest}` : ''}`)
+  const names = fileNames(turn.files)
+  const withFiles = (named: number) => {
+    if (names.length === 0) return parts.join(' · ')
+    const rest = names.length - named
+    const files =
+      named > 0
+        ? `${names.slice(0, named).join(', ')}${rest > 0 ? ` +${rest}` : ''}`
+        : `${names.length} ${names.length === 1 ? 'file' : 'files'}`
+    return [...parts, files].join(' · ')
   }
-  return parts.join(' · ')
+  for (let named = Math.min(NAMED_FILES, names.length); named > 0; named--) {
+    const line = withFiles(named)
+    if (cellWidth(line) <= maxCells) return line
+  }
+  return withFiles(0)
 }
-
-const EDITING_TOOLS = new Set(['Edit', 'Write'])
-const baseName = (path: string) => path.split(/[\\/]/).pop() || path
 
 type TranscriptIndex = {
   prompts: Entry[]
@@ -204,7 +223,7 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
         owners.push([block.id, owner])
         turn.tools++
         const path = block.input?.file_path
-        if (EDITING_TOOLS.has(block.name) && typeof path === 'string' && !turn.files.includes(baseName(path))) turn.files.push(baseName(path))
+        if (EDITING_TOOLS.has(block.name) && typeof path === 'string' && !turn.files.includes(path)) turn.files.push(path)
       }
       continue
     }
@@ -364,6 +383,9 @@ export const register: Register = (on, options) => {
 
   // A change of the setting reloads this module with the new value.
   let mode: Mode = isMode(options.mode) ? options.mode : 'vertical'
+  // The subagent whose transcript is in view, as the rail's sites last drew;
+  // undefined for the main conversation, whose rows alone the rail lists.
+  let viewAgent: string | undefined
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
   let railColumns = 0
@@ -403,6 +425,12 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'turn-rail' }, async ($, e) => {
     const asked = e.args.trim()
     if (asked === 'next' || asked === 'prev') {
+      // The main conversation's rows are not drawn beside a subagent's, so a
+      // jump would be refused and wrongly dot a prompt that can be reached.
+      if (viewAgent !== undefined) {
+        $.ui.toast('turn-rail: next and prev move through the main conversation; switch back to it first')
+        return {}
+      }
       const target = stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)
       const entry = entries[target]
       if (entry) await jumpTo($, entry.id, unreachable)
@@ -513,9 +541,9 @@ export const register: Register = (on, options) => {
   const isUnreachable = (i: number) => unreachable.has(entries[i]?.id ?? '')
 
   // A prompt's text and its turn's details on one line `width` cells wide: the
-  // text is cut first, down to a few words, so the details keep their room.
+  // text is cut first, down to a few words, then the details name fewer files.
   const withTurn = (entry: Entry, width: number) => {
-    const details = turnLine(turnOf(entry.id))
+    const details = turnLine(turnOf(entry.id), width - MIN_CARD_TEXT - ' · '.length)
     if (!details) return oneLine(entry.text, width)
     const room = Math.max(MIN_CARD_TEXT, width - cellWidth(details) - ' · '.length)
     return `${oneLine(entry.text, room)} · ${details}`
@@ -524,6 +552,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
+    viewAgent = e.props.view.agentId
     const nextColumns = isRail ? e.props.bodyColumns : 0
     if (nextColumns !== railColumns) {
       // The band decides from this whether it carries the cards.
@@ -595,6 +624,7 @@ export const register: Register = (on, options) => {
   // row of ticks with the hovered prompt beside them. Vertical with a dock too
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    viewAgent = e.props.view.agentId
     // Nothing while a survey holds the band or a subagent's transcript is in view.
     if (e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
