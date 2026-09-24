@@ -110,6 +110,25 @@ test('/turn-rail horizontal draws a text line over one row of bars, heavy where 
   expect((await band.press({ key: 'jump-0' }))?.element).toBe('jump-0')
 })
 
+test('with no prompt on screen the text line shows the newest one and no bar is heavy', async ($, on) => {
+  on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  mock.store(on)
+  on('config.set', ($: any, e: any) => ({ value: e.value }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({}))
+  on('ui.toast', () => {})
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', null) })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  // An empty line reads as a broken rail; the heavy bar still means "being read".
+  expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeDefined()
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '│'])
+})
+
 test('the horizontal band keeps the focus ring off its bars', async ($, on) => {
   const moves: (string | undefined)[] = []
   // Stand in for the engine moving the ring.

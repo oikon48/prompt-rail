@@ -731,7 +731,8 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
           <Box height={1} width={width}>
-            <Text dimColor wrap="truncate-end">{current >= 0 ? label(current) : ' '}</Text>
+            {/* With no prompt known on screen, the newest: an empty line reads as a broken rail. */}
+            <Text dimColor wrap="truncate-end">{label(center)}</Text>
             {entries.map((_, i) => (
               <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
                 <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
