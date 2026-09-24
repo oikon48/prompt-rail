@@ -173,6 +173,10 @@ type Beneath = {
   panes: string[]
   commands: unknown[]
   toasts: string[]
+  // Whether the surface draws the pane it is asked to open, and each line the
+  // plugin pinned as its status (undefined for a clear).
+  placed: boolean
+  status: (string | undefined)[]
 }
 const beneath = (transcript = TRANSCRIPT): Beneath => ({
   transcript,
@@ -183,6 +187,8 @@ const beneath = (transcript = TRANSCRIPT): Beneath => ({
   panes: [],
   commands: [],
   toasts: [],
+  placed: true,
+  status: [],
 })
 
 // The world beneath the plugin for a session whose transcript is TRANSCRIPT,
@@ -224,7 +230,11 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
   })
   on('ui.open', ($: any, e: any) => {
     disk.panes.push(`open ${e.id}`)
-    return { value: { isPlaced: true } }
+    return { value: disk.placed ? { isPlaced: true } : { isPlaced: false, reason: 'the terminal is 100 columns wide' } }
+  })
+  on('ui.status', ($: any, e: any) => {
+    disk.status.push(e.text)
+    return { value: undefined }
   })
   on('ui.close', ($: any, e: any) => {
     disk.panes.push(`close ${e.id}`)
@@ -781,4 +791,41 @@ test('the horizontal rail marks each bar in the row above it', async ($, on) => 
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   const marks = (await band.findAll({ type: 'Text' })).filter((t: any) => /^mark-/.test(String(t.props.key ?? t.key ?? '')) || ['×', '•'].includes(t.text))
   expect(marks.map((t: any) => [t.text, t.props.color])).toEqual([['×', 'error'], ['×', 'error'], ['•', 'success']])
+})
+
+test('where the pane waits undrawn, the status line shows the position', async ($, on) => {
+  const disk = { ...beneath(), placed: false }
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u3', props: prompt('continue', { first: 0, last: 1, of: 2 }) })
+  expect(disk.status.at(-1)).toBe('#3/4')
+  // Once the pane is drawn it shows the position itself.
+  const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: pane('dock', 40) })
+  expect(disk.status.at(-1)).toBeUndefined()
+  await rail.unmount()
+})
+
+// The kit raises no person's close of a pane; that path is checked live.
+test('a pane that can no longer be drawn brings the position back to the status line', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.status).toEqual([])
+  // The terminal narrows; the pane closed for the band waits undrawn when reopened.
+  disk.placed = false
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'vertical' })
+  expect(disk.status.at(-1)).toBe('#–/4')
+})
+
+test('the horizontal band needs no status line', async ($, on) => {
+  const disk = { ...beneath(), placed: false }
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.status.at(-1)).toBe('#–/4')
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  expect(disk.status.at(-1)).toBeUndefined()
 })
