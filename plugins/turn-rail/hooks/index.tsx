@@ -8,6 +8,8 @@ const RAIL_COLUMNS = 4
 // Below this many body columns the vertical rail has no room to reveal the
 // prompt beside a tick, so the band above the prompt shows it instead.
 const INLINE_REVEAL_MIN_COLUMNS = 12
+// Cells a hover card keeps for the prompt's text beside the turn's details.
+const MIN_CARD_TEXT = 12
 // The mode is the plugin's `mode` setting (userConfig), a row in /config. An
 // earlier version kept it in the store under this key, shared by every session.
 const LEGACY_MODE_KEY = 'mode'
@@ -101,8 +103,45 @@ export const stepFrom = (current: number, count: number, dir: 1 | -1, isSkipped:
   return -1
 }
 
+// What the transcript records of the turn a prompt started: how long it took
+// (`durationMs` as the engine reported it, else `spanMs` from the prompt to
+// the latest reply), how many tools it called, and the files it edited (Edit
+// and Write), by name.
+export type Turn = { durationMs?: number; spanMs?: number; tools: number; files: string[] }
+
+// A duration as the rail shows it: `7s`, `1m 23s`, `1h 2m`.
+const duration = (ms: number) => {
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+}
+
+// The files a turn line names before it counts the rest.
+const NAMED_FILES = 3
+
+// A turn on one line: `1m 23s · 4 tools · app.ts, README.md`, each part left
+// out when the transcript has nothing for it; empty when it has nothing.
+export const turnLine = (turn: Turn | undefined) => {
+  if (!turn) return ''
+  const parts: string[] = []
+  const ms = turn.durationMs ?? turn.spanMs
+  if (ms !== undefined) parts.push(duration(ms))
+  if (turn.tools > 0) parts.push(`${turn.tools} ${turn.tools === 1 ? 'tool' : 'tools'}`)
+  if (turn.files.length > 0) {
+    const rest = turn.files.length - NAMED_FILES
+    parts.push(`${turn.files.slice(0, NAMED_FILES).join(', ')}${rest > 0 ? ` +${rest}` : ''}`)
+  }
+  return parts.join(' · ')
+}
+
+const EDITING_TOOLS = new Set(['Edit', 'Write'])
+const baseName = (path: string) => path.split(/[\\/]/).pop() || path
+
 type TranscriptIndex = {
   prompts: Entry[]
+  // The turn each prompt started, in the same order.
+  turns: Turn[]
   // Reply row uuid or tool_use id -> index into prompts of the prompt it answers.
   owners: [string, number][]
   // Every row uuid the file holds, live branch or not.
@@ -143,15 +182,29 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
   const live = liveBranch(rows)
   const prompts: Entry[] = []
   const owners: [string, number][] = []
+  const turns: Turn[] = []
+  // When each turn started and when its latest reply was written.
+  const times: { start: number; last: number }[] = []
   for (const row of rows) {
     if (row.isSidechain || !live.has(row.uuid)) continue
+    const turn = turns[turns.length - 1]
+    if (row.type === 'system' && row.subtype === 'turn_duration' && typeof row.durationMs === 'number') {
+      if (turn) turn.durationMs = (turn.durationMs ?? 0) + row.durationMs
+      continue
+    }
     if (row.type === 'assistant') {
-      if (prompts.length === 0) continue
+      if (prompts.length === 0 || !turn) continue
       const owner = prompts.length - 1
       owners.push([row.uuid, owner])
+      const at = Date.parse(row.timestamp)
+      if (Number.isFinite(at)) times[owner]!.last = at
       const blocks = Array.isArray(row.message?.content) ? row.message.content : []
       for (const block of blocks) {
-        if (block?.type === 'tool_use' && typeof block.id === 'string') owners.push([block.id, owner])
+        if (block?.type !== 'tool_use' || typeof block.id !== 'string') continue
+        owners.push([block.id, owner])
+        turn.tools++
+        const path = block.input?.file_path
+        if (EDITING_TOOLS.has(block.name) && typeof path === 'string' && !turn.files.includes(baseName(path))) turn.files.push(baseName(path))
       }
       continue
     }
@@ -170,8 +223,15 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
     text = text.trim()
     if (!text || WRAPPER.test(text)) continue
     prompts.push({ id: row.uuid, text })
+    turns.push({ tools: 0, files: [] })
+    const at = Date.parse(row.timestamp)
+    times.push({ start: at, last: at })
   }
-  return { prompts, owners, known: new Set(rows.map(row => row.uuid)) }
+  turns.forEach((turn, i) => {
+    const time = times[i]
+    if (time && Number.isFinite(time.start) && time.last > time.start) turn.spanMs = time.last - time.start
+  })
+  return { prompts, turns, owners, known: new Set(rows.map(row => row.uuid)) }
 }
 
 // The size and modification time of the transcript as last read.
@@ -237,6 +297,18 @@ export const register: Register = (on, options) => {
   let entries: Entry[] = []
   // Assistant row uuid -> the prompt it answers, from the transcript.
   let owners = new Map<string, string>()
+  // Prompt id -> the turn it started, from the transcript.
+  let turns = new Map<string, Turn>()
+  // Prompt id -> how long its turns took as the engine reported them on
+  // ending, for a turn whose turn_duration row the transcript lacks yet.
+  const reported = new Map<string, number>()
+  // A prompt's turn as the rail shows it.
+  const turnOf = (id: string): Turn | undefined => {
+    const turn = turns.get(id)
+    const ms = reported.get(id)
+    if (ms === undefined || turn?.durationMs !== undefined) return turn
+    return { tools: 0, files: [], ...turn, durationMs: ms }
+  }
   // The latest pass of onScreen reports: which transcript rows (prompts,
   // replies, tool rows) it said the viewport shows, by id. Only this pass is
   // read, since a row that left away from the viewport's edges is not told.
@@ -357,10 +429,12 @@ export const register: Register = (on, options) => {
   // and one the file holds off the live branch (rewound away) drops out. True
   // when the list or the prompt being read changed, so the rail needs a redraw.
   const merge = (index: TranscriptIndex) => {
-    const listed = (list: Entry[]) => list.map(entry => `${entry.id}\u0000${entry.text}`).join('\u0001')
+    // A turn's details count as the list's: a turn that ends changes its card.
+    const listed = (list: Entry[]) => list.map(entry => `${entry.id}\u0000${entry.text}\u0000${turnLine(turnOf(entry.id))}`).join('\u0001')
     const before = { list: listed(entries), current: currentIndex() }
     entries = [...index.prompts, ...entries.filter(entry => !index.known.has(entry.id))]
     owners = new Map(index.owners.map(([id, i]) => [id, index.prompts[i]?.id ?? '']))
+    turns = new Map(index.prompts.map((entry, i) => [entry.id, index.turns[i] ?? { tools: 0, files: [] }]))
     return listed(entries) !== before.list || currentIndex() !== before.current
   }
 
@@ -368,6 +442,8 @@ export const register: Register = (on, options) => {
     if (e.source === 'clear') {
       entries = []
       owners = new Map()
+      turns = new Map()
+      reported.clear()
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
       unreachable.clear()
@@ -385,6 +461,19 @@ export const register: Register = (on, options) => {
     const index = await readTranscript($, e.transcript_path, seen)
     if (index && merge(index)) $.ui.invalidate('ui.render')
     return next(e)
+  })
+
+  // A main-loop turn ended: its prompt is the newest. The transcript's
+  // turn_duration row is written after the Stop hook reads the file, so keep
+  // the engine's figure until a later read has the row.
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    const entry = entries[entries.length - 1]
+    if (e.agentId === undefined && entry) {
+      reported.set(entry.id, (reported.get(entry.id) ?? 0) + e.durationMs)
+      if (turns.get(entry.id)?.durationMs === undefined) $.ui.invalidate('ui.render')
+    }
+    return result
   })
 
   // Record every prompt row as it is drawn, and which rows the viewport shows.
@@ -420,6 +509,15 @@ export const register: Register = (on, options) => {
   })
 
   const isUnreachable = (i: number) => unreachable.has(entries[i]?.id ?? '')
+
+  // A prompt's text and its turn's details on one line `width` cells wide: the
+  // text is cut first, down to a few words, so the details keep their room.
+  const withTurn = (entry: Entry, width: number) => {
+    const details = turnLine(turnOf(entry.id))
+    if (!details) return oneLine(entry.text, width)
+    const room = Math.max(MIN_CARD_TEXT, width - cellWidth(details) - ' · '.length)
+    return `${oneLine(entry.text, room)} · ${details}`
+  }
 
   on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -502,7 +600,7 @@ export const register: Register = (on, options) => {
       entries.map((entry, i) => (
         <Box key={`card-${i}`} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
           <Text dimColor>{`#${i + 1} `}</Text>
-          <Text wrap="truncate-end">{oneLine(entry.text, width)}</Text>
+          <Text wrap="truncate-end">{withTurn(entry, width)}</Text>
         </Box>
       ))
 
@@ -522,6 +620,11 @@ export const register: Register = (on, options) => {
       const shown = entries.slice(first, first + capacity)
       const hidesAfter = first + capacity < entries.length
       const label = (i: number) => `#${i + 1} ${oneLine(entries[i]?.text ?? '', width - `#${i + 1} `.length)}`
+      // The hovered prompt's card also sums up its turn.
+      const card = (i: number) => {
+        const entry = entries[i]
+        return entry ? `#${i + 1} ${withTurn(entry, width - `#${i + 1} `.length)}` : ''
+      }
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
           <Text> </Text>
@@ -550,7 +653,7 @@ export const register: Register = (on, options) => {
             <Text dimColor wrap="truncate-end">{current >= 0 ? label(current) : ' '}</Text>
             {entries.map((_, i) => (
               <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
-                <Text wrap="truncate-end">{padTo(label(i), width)}</Text>
+                <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
               </Box>
             ))}
           </Box>

@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, noteScroll, stepFrom, tick } from './index.tsx'
+import { bar, noteScroll, stepFrom, tick, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -538,4 +538,107 @@ test('a focused pane makes room for the hotkey so each row stays one line', asyn
   expect(Math.max(...wide.map(label => label.length))).toBeLessThanOrEqual(29)
   // Too narrow for text: the hotkey and the tick fill the rail.
   expect(await labels(4)).toEqual(['1: ─', '2: ━', '3: ─'])
+})
+
+// Two turns: the first edits files and records its duration, the second only
+// replies, so its duration comes from the rows' timestamps.
+const TURNS = jsonl([
+  { type: 'user', uuid: 'u1', timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content: 'first' } },
+  {
+    type: 'assistant',
+    uuid: 'a1',
+    timestamp: '2026-09-24T00:00:10.000Z',
+    message: {
+      role: 'assistant',
+      content: [
+        { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/w/src/app.ts', old_string: 'a', new_string: 'b' } },
+        { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'ls' } },
+      ],
+    },
+  },
+  { type: 'user', uuid: 'r1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+  {
+    type: 'assistant',
+    uuid: 'a2',
+    timestamp: '2026-09-24T00:01:00.000Z',
+    message: {
+      role: 'assistant',
+      content: [
+        { type: 'tool_use', id: 't3', name: 'Write', input: { file_path: '/w/README.md', content: '' } },
+        { type: 'tool_use', id: 't4', name: 'Edit', input: { file_path: '/w/src/app.ts', old_string: 'b', new_string: 'c' } },
+      ],
+    },
+  },
+  { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 83000, timestamp: '2026-09-24T00:01:23.000Z' },
+  { type: 'user', uuid: 'u2', timestamp: '2026-09-24T00:02:00.000Z', message: { role: 'user', content: 'second' } },
+  { type: 'assistant', uuid: 'a3', timestamp: '2026-09-24T00:02:07.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
+])
+
+test('a turn is summed up as its duration, tool calls and edited files', () => {
+  expect(turnLine({ durationMs: 83000, tools: 4, files: ['app.ts', 'README.md'] })).toBe('1m 23s · 4 tools · app.ts, README.md')
+  expect(turnLine({ durationMs: 7000, tools: 1, files: [] })).toBe('7s · 1 tool')
+  expect(turnLine({ durationMs: 3_720_000, tools: 0, files: [] })).toBe('1h 2m')
+  expect(turnLine({ tools: 0, files: [] })).toBe('')
+  expect(turnLine({ durationMs: 500, tools: 5, files: ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'] })).toBe('0s · 5 tools · a.ts, b.ts, c.ts +2')
+})
+
+test('the hover card in the horizontal rail carries the turn\'s details', async ($, on) => {
+  world(on, {}, TURNS)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first · 1m 23s · 4 tools · app\.ts, README\.md\s*$/ })).toBeDefined()
+  // No turn_duration row: the time from the prompt to the turn's last row.
+  expect(await band.find({ type: 'Text', text: /^#2 second · 7s\s*$/ })).toBeDefined()
+})
+
+test('a narrow band keeps room for the details by cutting the prompt first', async ($, on) => {
+  world(on, {}, jsonl([
+    { type: 'user', uuid: 'u1', timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content: 'a prompt far too long to fit in a narrow band beside its details' } },
+    { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 9000 },
+  ]))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 40 } })
+  // Thirty-six cells: `#1 `, the text cut to 28, then ` · 9s`.
+  const card = await band.find({ type: 'Text', text: /^#1 a prompt far too long to fi… · 9s\s*$/ })
+  expect(card).toBeDefined()
+  expect(String(card?.text).trimEnd().length).toBeLessThanOrEqual(36)
+})
+
+test('the hover card of a narrow vertical rail carries the turn\'s details', async ($, on) => {
+  world(on, {}, TURNS)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: pane('dock', 4) })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^first · 1m 23s · 4 tools · app\.ts, README\.md$/ })).toBeDefined()
+})
+
+test('a turn that ends redraws, so its card carries the new details', async ($, on) => {
+  const first = { type: 'user', uuid: 'u1', timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content: 'first' } }
+  const disk = beneath(jsonl([first]))
+  world(on, {}, disk.transcript, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await railLabels($)
+  const before = disk.invalidations
+  disk.transcript = jsonl([first, { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 4000 }])
+  disk.mtimeMs = 2
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(disk.invalidations).toBe(before + 1)
+})
+
+test('a turn that just ended shows the duration the engine reported before the transcript has it', async ($, on) => {
+  // At the Stop hook the transcript holds neither the turn_duration row nor
+  // the turn's last reply: the rows' timestamps alone would say 7s.
+  world(on, {}, TURNS)
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  // A subagent's turn is not the prompt's.
+  await $.turn.complete({ answer: '', durationMs: 99000, isAborted: false, turnId: 'sub', agentId: 'ag1', reason: 'answer' })
+  await $.turn.complete({ answer: 'done', durationMs: 12500, isAborted: false, turnId: 'main', reason: 'answer' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#2 second · 12s\s*$/ })).toBeDefined()
+  // The turn_duration row the transcript records wins where it has one.
+  expect(await band.find({ type: 'Text', text: /^#1 first · 1m 23s · 4 tools · app\.ts, README\.md\s*$/ })).toBeDefined()
 })
