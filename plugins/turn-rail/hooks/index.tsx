@@ -424,6 +424,10 @@ export const register: Register = (on, options) => {
   let lastCurrent = -1
   // The bottom edge of the span on screen, for the viewport thumb.
   let lastBottom = -1
+  // The rows of the bottom prompt the engine still shows, as far as it told
+  // us: a shown report adds one, an off-screen report drops one. The bottom
+  // edge can only have moved up once the last of them is gone.
+  let bottomRows = new Set<string>()
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
   const seen: Seen = { path: '', size: -1, mtimeMs: -1 }
@@ -449,9 +453,9 @@ export const register: Register = (on, options) => {
   // latest pass's shown rows, a reply or tool row counting as its prompt's.
   // A scroll reports the rows at the viewport's edges, a redraw every row, so
   // the shown rows of either bound the viewport. Each bound is kept while no
-  // known row shows, and the bottom keeps until a pass reports the bottom
-  // prompt's own row off the screen — a sparse pass may simply not carry the
-  // bottom edge's reports, so its greatest shown index is only a lower bound.
+  // known row shows, and the bottom keeps while a row of its prompt is known
+  // on the screen — a sparse pass may simply not carry the bottom edge's
+  // reports, so its greatest shown index is only a lower bound.
   const shownRange = () => {
     const promptIndex = new Map(entries.map((entry, i) => [entry.id, i]))
     // Where a row counts on the rail: a prompt at its own index, a reply or
@@ -465,28 +469,36 @@ export const register: Register = (on, options) => {
     }
     // A list that shrank under the saved bottom (a rewind) leaves it off the
     // end: it is gone, not merely unproven.
-    if (lastBottom >= entries.length) lastBottom = -1
+    if (lastBottom >= entries.length) {
+      lastBottom = -1
+      bottomRows = new Set()
+    }
     let top = -1
     let bottom = -1
-    // The saved bottom's own prompt row reported off the screen — the one
-    // sign a pass can give that the bottom edge moved up. A reply or tool row
-    // at that prompt leaving proves less: a sibling may stay on the screen
-    // unreported, and a row further down was never on it.
-    let bottomLeft = false
     for (const [id, isShown] of pass.rows) {
       if (id === PROVISIONAL_ID) continue
       const i = indexOf(id)
       if (!isShown) {
-        if (id === entries[lastBottom]?.id) bottomLeft = true
+        if (i === lastBottom) bottomRows.delete(id)
         continue
       }
       if (i === undefined) continue
+      if (i === lastBottom) bottomRows.add(id)
       if (top < 0 || i < top) top = i
       if (bottom < 0 || i > bottom) bottom = i
     }
     if (top >= 0) {
       lastCurrent = top
-      lastBottom = bottomLeft ? bottom : Math.max(bottom, lastBottom)
+      // The edge moved: a lower prompt shows, or the last row known on the
+      // saved one left. Re-anchor the known rows at the new bottom.
+      if (bottom > lastBottom || (bottom < lastBottom && bottomRows.size === 0)) {
+        lastBottom = bottom
+        bottomRows = new Set(
+          [...pass.rows]
+            .filter(([id, isShown]) => isShown && id !== PROVISIONAL_ID && indexOf(id) === bottom)
+            .map(([id]) => id),
+        )
+      }
     }
     const bound = (last: number) => (last >= 0 && last < entries.length ? last : -1)
     return [bound(lastCurrent), bound(lastBottom)] as const
@@ -624,6 +636,7 @@ export const register: Register = (on, options) => {
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
       lastBottom = -1
+      bottomRows = new Set()
       unreachable.clear()
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       $.ui.invalidate('ui.render')

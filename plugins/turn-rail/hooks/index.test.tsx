@@ -170,11 +170,18 @@ test('a lone report from the top edge keeps the span over the prompts below', as
   await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'ToolUse', requestId: 't3', props: { tool_use_id: 't3', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: null } })
   await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
   expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-  // The bottom prompt's own row leaving is the one sign the edge moved up.
+  // A tool row seen on the bottom prompt keeps it once the prompt's own row
+  // is gone; the span moves up only when the last row known on it leaves.
   await new Promise(resolve => setTimeout(resolve, 200))
+  const m4 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm4', props: prompt('fourth prompt', { first: 0, last: 1, of: 2 }) })
+  const t4 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'ToolUse', requestId: 't4', props: { tool_use_id: 't4', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: { first: 0, last: 1, of: 2 } } })
   await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
-  await m3.redraw(prompt('third prompt', null))
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_DEFAULT])
+  await m4.redraw(prompt('fourth prompt', null))
+  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB, CELL_THUMB])
+  await new Promise(resolve => setTimeout(resolve, 200))
+  await t4.redraw({ tool_use_id: 't4', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: null })
+  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
+  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_DEFAULT, CELL_DEFAULT])
 })
 
 // A transcript JSONL from rows given in order; each row's parent is the one
