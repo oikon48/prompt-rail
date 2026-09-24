@@ -25,6 +25,8 @@ const PROVISIONAL_ID = 'placeholder'
 // User rows the engine writes around its own output (slash commands, bash
 // mode, reminders), which are not prompts.
 const WRAPPER = /^<(command-|local-command-|bash-|system-reminder|task-notification|user-prompt-submit-hook)/
+// The notice the engine stores as a user row when the person interrupts a turn.
+const INTERRUPTED = /^\[Request interrupted by user/
 // onScreen reports that arrive within this many ms of each other are one pass
 // of the surface (a scroll, or a redraw), read together.
 const PASS_MS = 150
@@ -240,7 +242,9 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
         .join('\n')
     }
     text = text.trim()
-    if (!text || WRAPPER.test(text)) continue
+    // A slash command's own row is not a prompt: the render hook skips it too,
+    // so it is never drawn and could not be scrolled to.
+    if (!text || WRAPPER.test(text) || INTERRUPTED.test(text) || text.startsWith('/')) continue
     prompts.push({ id: row.uuid, text })
     turns.push({ tools: 0, files: [] })
     const at = Date.parse(row.timestamp)

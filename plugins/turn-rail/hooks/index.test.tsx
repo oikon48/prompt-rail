@@ -713,3 +713,15 @@ test('a long turn summary keeps its end in the card', async ($, on) => {
   expect(card).toBeDefined()
   expect(String(card?.text).trimEnd().length).toBeLessThanOrEqual(46)
 })
+
+test('slash-command rows and interruption notices are not listed as prompts', async ($, on) => {
+  world(on, {}, jsonl([
+    { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } },
+    { type: 'user', uuid: 'i1', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } },
+    { type: 'user', uuid: 'c1', message: { role: 'user', content: '/compact' } },
+    { type: 'user', uuid: 'u2', message: { role: 'user', content: 'second' } },
+    { type: 'user', uuid: 'i2', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } },
+  ]))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['first', 'second'])
+})
