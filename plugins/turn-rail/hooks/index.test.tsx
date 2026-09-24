@@ -126,11 +126,28 @@ test('the horizontal band keeps the focus ring off its bars', async ($, on) => {
   expect((await focus('AbovePrompt', 'turn-rail', 'jump-0')).deny).toBeDefined()
   expect((await focus('AbovePrompt', 'turn-rail', 'jump-1')).deny).toBeDefined()
   expect(moves).toEqual([])
-  // Another plugin's element in the band, and the vertical pane's rows, move it.
+  // Another plugin's element in the band moves it.
   await focus('AbovePrompt', 'survey', 'yes')
+  expect(moves).toEqual(['yes'])
+})
+
+test('the vertical pane keeps the focus ring off its rows, the engine\'s own stops aside', async ($, on) => {
+  const moves: (string | undefined)[] = []
+  // Stand in for the engine moving the ring.
+  on('ui.focus', ($: any, e: any) => {
+    moves.push(e.element ?? 'engine stop')
+    return {}
+  })
+  await drawPrompts($, on)
   await $.command.run({ command: 'turn-rail', args: 'vertical' })
-  await focus('Pane', 'turn-rail', 'jump-0')
-  expect(moves).toEqual(['yes', 'jump-0'])
+  // A ringed row beside the row under the pointer lights two rows at once;
+  // the digits still jump while the pane holds the keyboard.
+  const ringed = await $.ui.focus({ component: 'Pane', requestId: 'turn-rail', plugin: 'turn-rail', element: 'jump-0', origin: { kind: 'person' } })
+  expect(ringed.deny).toBeDefined()
+  expect(moves).toEqual([])
+  // The pane's close mark is the engine's, so the ring still reaches it.
+  await $.ui.focus({ component: 'Pane', requestId: 'turn-rail', origin: { kind: 'person' } })
+  expect(moves).toEqual(['engine stop'])
 })
 
 test('with several prompts on screen only the topmost one is heavy', async ($, on) => {

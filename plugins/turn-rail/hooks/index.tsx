@@ -774,6 +774,14 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // In the pane, a ringed row and the row under the pointer light at once and
+  // read as two highlights. Keep the ring off the rows; the digits still jump
+  // while the pane holds the keyboard, and the engine's own stops (the close
+  // mark, the tabs) carry no plugin, so the matcher leaves them be.
+  on('ui.focus', { component: 'Pane', requestId: PANE, plugin: 'turn-rail' }, async () => ({
+    deny: 'turn-rail: the rail takes clicks and digits, not the focus ring',
+  }))
+
   // Scroll from the press dispatch itself (a click or a hotkey).
   on('ui.press', { plugin: 'turn-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
