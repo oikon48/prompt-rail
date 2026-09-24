@@ -173,6 +173,10 @@ type Beneath = {
   panes: string[]
   commands: unknown[]
   toasts: string[]
+  // Whether the surface draws the pane it is asked to open, and each line the
+  // plugin pinned as its status (undefined for a clear).
+  placed: boolean
+  status: (string | undefined)[]
 }
 const beneath = (transcript = TRANSCRIPT): Beneath => ({
   transcript,
@@ -183,6 +187,8 @@ const beneath = (transcript = TRANSCRIPT): Beneath => ({
   panes: [],
   commands: [],
   toasts: [],
+  placed: true,
+  status: [],
 })
 
 // The world beneath the plugin for a session whose transcript is TRANSCRIPT,
@@ -224,7 +230,11 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
   })
   on('ui.open', ($: any, e: any) => {
     disk.panes.push(`open ${e.id}`)
-    return { value: { isPlaced: true } }
+    return { value: disk.placed ? { isPlaced: true } : { isPlaced: false, reason: 'the terminal is 100 columns wide' } }
+  })
+  on('ui.status', ($: any, e: any) => {
+    disk.status.push(e.text)
+    return { value: undefined }
   })
   on('ui.close', ($: any, e: any) => {
     disk.panes.push(`close ${e.id}`)
@@ -534,8 +544,9 @@ test('a focused pane makes room for the hotkey so each row stays one line', asyn
     return drawn
   }
   const wide = await labels(30)
-  expect(wide[2]).toBe('3: ─ a long prompt that woul…')
-  expect(Math.max(...wide.map(label => label.length))).toBeLessThanOrEqual(29)
+  expect(wide[2]).toBe('3: ─ a long prompt that wou…')
+  // With the mark's cell before it, a row still leaves the frame a cell.
+  expect(Math.max(...wide.map(label => 1 + label.length))).toBeLessThanOrEqual(29)
   // Too narrow for text: the hotkey and the tick fill the rail.
   expect(await labels(4)).toEqual(['1: ─', '2: ━', '3: ─'])
 })
@@ -712,4 +723,109 @@ test('a long turn summary keeps its end in the card', async ($, on) => {
   const card = await band.find({ type: 'Text', text: /· 9s · 2 tools · 2 files\s*$/ })
   expect(card).toBeDefined()
   expect(String(card?.text).trimEnd().length).toBeLessThanOrEqual(46)
+})
+
+test('slash-command rows and interruption notices are not listed as prompts', async ($, on) => {
+  world(on, {}, jsonl([
+    { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } },
+    { type: 'user', uuid: 'i1', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } },
+    { type: 'user', uuid: 'c1', message: { role: 'user', content: '/compact' } },
+    { type: 'user', uuid: 'u2', message: { role: 'user', content: 'second' } },
+    { type: 'user', uuid: 'i2', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } },
+  ]))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['first', 'second'])
+})
+
+// Three turns: interrupted, ended by an API error, and one that edited a file.
+const OUTCOMES = jsonl([
+  { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } },
+  { type: 'assistant', uuid: 'a1', message: { role: 'assistant', content: [{ type: 'text', text: 'partial' }] } },
+  { type: 'user', uuid: 'i1', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } },
+  { type: 'user', uuid: 'u2', message: { role: 'user', content: 'second' } },
+  { type: 'assistant', uuid: 'a2', isApiErrorMessage: true, message: { role: 'assistant', content: [{ type: 'text', text: 'API Error' }] } },
+  { type: 'user', uuid: 'u3', message: { role: 'user', content: 'third' } },
+  { type: 'assistant', uuid: 'a3', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: '/w/a.ts' } }] } },
+  { type: 'user', uuid: 'u4', message: { role: 'user', content: 'fourth' } },
+])
+
+// Each row's mark as [glyph, color] from the pane's marks column.
+const paneMarks = async ($: any, surface: 'terminal' | 'desktop' = 'terminal', placement: 'dock' | 'inline' = 'dock') => {
+  const site = await $.ui.mount({ plugin: 'turn-rail', surface, component: 'Pane', requestId: 'turn-rail', props: pane(placement, 40) })
+  const marks = (await site.findAll({ type: 'Text' })).map((t: any) => [t.text, t.props.color])
+  await site.unmount()
+  return marks
+}
+
+test('a turn is summed up with how it ended', () => {
+  expect(turnLine({ durationMs: 7000, tools: 1, files: [], outcome: 'interrupted' })).toBe('7s · interrupted · 1 tool')
+  expect(turnLine({ tools: 0, files: [], outcome: 'error' })).toBe('API error')
+  expect(turnLine({ tools: 2, files: [], outcome: 'running' })).toBe('running · 2 tools')
+})
+
+test('each row is marked by how its turn went', async ($, on) => {
+  world(on, {}, OUTCOMES)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  const expected = [['×', 'error'], ['×', 'error'], ['•', 'success'], [' ', undefined]]
+  expect(await paneMarks($)).toEqual(expected)
+  expect(await paneMarks($, 'desktop', 'inline')).toEqual(expected)
+  // The ticks keep their place: the mark takes the cell before them.
+  expect(await railLabels($)).toEqual(['first', 'second', 'third', 'fourth'])
+})
+
+test('the running turn is marked until it ends, then by how it ended', async ($, on) => {
+  world(on, {}, jsonl([{ type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } }]))
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.turn.start({ text: 'first', turnId: 't1' })
+  expect(await paneMarks($)).toEqual([['•', 'warning']])
+  await $.turn.complete({ answer: '', durationMs: 3000, isAborted: true, turnId: 't1', reason: 'aborted' })
+  expect(await paneMarks($)).toEqual([['×', 'error']])
+})
+
+test('the horizontal rail marks each bar in the row above it', async ($, on) => {
+  world(on, {}, OUTCOMES)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const marks = (await band.findAll({ type: 'Text' })).filter((t: any) => /^mark-/.test(String(t.props.key ?? t.key ?? '')) || ['×', '•'].includes(t.text))
+  expect(marks.map((t: any) => [t.text, t.props.color])).toEqual([['×', 'error'], ['×', 'error'], ['•', 'success']])
+})
+
+test('where the pane waits undrawn, the status line shows the position', async ($, on) => {
+  const disk = { ...beneath(), placed: false }
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u3', props: prompt('continue', { first: 0, last: 1, of: 2 }) })
+  expect(disk.status.at(-1)).toBe('#3/4')
+  // Once the pane is drawn it shows the position itself.
+  const rail = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'Pane', requestId: 'turn-rail', props: pane('dock', 40) })
+  expect(disk.status.at(-1)).toBeUndefined()
+  await rail.unmount()
+})
+
+// The kit raises no person's close of a pane; that path is checked live.
+test('a pane that can no longer be drawn brings the position back to the status line', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.status).toEqual([])
+  // The terminal narrows; the pane closed for the band waits undrawn when reopened.
+  disk.placed = false
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'vertical' })
+  expect(disk.status.at(-1)).toBe('#–/4')
+})
+
+test('the horizontal band needs no status line', async ($, on) => {
+  const disk = { ...beneath(), placed: false }
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.status.at(-1)).toBe('#–/4')
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
+  expect(disk.status.at(-1)).toBeUndefined()
 })
