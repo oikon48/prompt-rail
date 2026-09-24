@@ -7,6 +7,7 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-D97757)
 ![Claude Code 2.1.280+](https://img.shields.io/badge/Claude%20Code-2.1.280%2B-555)
 ![Function hooks](https://img.shields.io/badge/function%20hooks-experimental-orange)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 <img src="docs/demo.gif" alt="turn-rail demo: hovering the rail previews a prompt and its turn, clicking jumps the transcript to it" width="800">
 
@@ -118,3 +119,7 @@ claude plugin test plugins/turn-rail
 ```
 
 Installed copies update only when the version in `plugins/turn-rail/.claude-plugin/plugin.json` changes, so bump it with each release.
+
+## License
+
+[MIT](LICENSE)
