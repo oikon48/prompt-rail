@@ -24,19 +24,19 @@ Start a new session afterwards. The rail opens on its own when the session start
 
 ## Usage
 
-The rail has two modes. The mode is the plugin's "Rail mode" setting, which `/config` lists as a picker, and `/prompts vertical` or `/prompts horizontal` is a shortcut that writes the same setting. Either way the change applies at once and is kept for later sessions, since Claude Code stores it under `pluginConfigs` in `~/.claude/settings.json`. A mode saved by an earlier version of the plugin moves into the setting the next time a session starts.
+The rail is driven by the `/turn-rail` command, named after the plugin so it does not collide with other plugins' commands. The rail has two modes. The mode is the plugin's "Rail mode" setting, which `/config` lists as a picker, and `/turn-rail vertical` or `/turn-rail horizontal` is a shortcut that writes the same setting. Either way the change applies at once and is kept for later sessions, since Claude Code stores it under `pluginConfigs` in `~/.claude/settings.json`. A mode saved by an earlier version of the plugin moves into the setting the next time a session starts.
 
-`/prompts vertical` is the default. It docks a pane beside the transcript with one row per prompt, a tick and the prompt's first line. The row of the prompt you are reading is drawn bright with a thick tick. If you drag the pane narrower than 12 columns, the rows shrink to ticks and the hovered prompt's text appears above the prompt input instead.
+`/turn-rail vertical` is the default. It docks a pane beside the transcript with one row per prompt, a tick and the prompt's first line. The row of the prompt you are reading is drawn bright with a thick tick. If you drag the pane narrower than 12 columns, the rows shrink to ticks and the hovered prompt's text appears above the prompt input instead.
 
-`/prompts horizontal` closes the pane and draws the rail in the band above the prompt input, as four rows: a blank row that separates it from the transcript, two rows of upright bars, and a text line. The prompt you are reading stands two rows tall and its text is shown dimmed on the text line. Hovering a bar raises it to two rows and replaces the text line with that prompt. When there are more prompts than the row can hold, it shows a window centered on the prompt you are reading, with `‹` and `›` marking the prompts elided on either side.
+`/turn-rail horizontal` closes the pane and draws the rail in the band above the prompt input, as four rows: a blank row that separates it from the transcript, two rows of upright bars, and a text line. The prompt you are reading stands two rows tall and its text is shown dimmed on the text line. Hovering a bar raises it to two rows and replaces the text line with that prompt. When there are more prompts than the row can hold, it shows a window centered on the prompt you are reading, with `‹` and `›` marking the prompts elided on either side.
 
 A hovered prompt's card also sums up the turn it started on the same line, as the transcript records it: how long it took, how many tool calls it made, and the names of the files it edited with Edit or Write, for example `#3 fix the overflow · 1m 23s · 4 tools · app.ts, README.md`. When the band is narrow, the prompt's text is cut first so the summary keeps its room.
 
 A prompt whose click the engine refused because its row is not drawn in the transcript gets a dotted tick (`┄`, or `┆` in the horizontal rail) from then on, so you can tell it apart before clicking it again.
 
-`/prompts next` and `/prompts prev` scroll the transcript to the prompt after or before the one you are reading, passing over prompts with a dotted tick. They run at once even while a turn is streaming. While the vertical pane has the keyboard (ctrl+x tab, or Tab onto it), its first nine rows show `1:` to `9:` in front of the tick, and pressing that digit jumps to the prompt. Esc gives the keyboard back to the prompt input. Claude Code does not let a plugin define keybindings of its own, so these commands and the pane's digits are the keyboard routes.
+`/turn-rail next` and `/turn-rail prev` scroll the transcript to the prompt after or before the one you are reading, passing over prompts with a dotted tick. They run at once even while a turn is streaming. While the vertical pane has the keyboard (ctrl+x tab, or Tab onto it), its first nine rows show `1:` to `9:` in front of the tick, and pressing that digit jumps to the prompt. Esc gives the keyboard back to the prompt input. Claude Code does not let a plugin define keybindings of its own, so these commands and the pane's digits are the keyboard routes.
 
-Running `/prompts` with no argument reopens the rail in the current mode. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
+Running `/turn-rail` with no argument reopens the rail in the current mode. While a subagent's transcript is in view, the rail steps aside, since its prompts belong to the main conversation.
 
 ## How it works
 
@@ -50,7 +50,7 @@ The dock's width is shared by every plugin pane and remembered by Claude Code on
 
 Prompts sent before a `/compact` stay drawn in the transcript and can still be jumped to. A row the rail lists but the transcript does not draw, such as the `/compact` command's own row that shows up in the list right after a compaction, cannot be. The rail only learns this when a click on it is refused, so the tick turns dotted after the first try, and `/clear` forgets it.
 
-Near the end of the transcript the last prompts may already be in view below the top row. The transcript cannot scroll any further, so `/prompts next` stays where it is and the thick tick keeps marking the prompt at the top. The digit hotkeys cover the first nine prompts of the list only.
+Near the end of the transcript the last prompts may already be in view below the top row. The transcript cannot scroll any further, so `/turn-rail next` stays where it is and the thick tick keeps marking the prompt at the top. The digit hotkeys cover the first nine prompts of the list only.
 
 The turn summary is part of the hover card, so it shows in horizontal mode and on the narrow vertical rail. The wide vertical rail and the desktop list draw the prompt's text in the row itself and have no card. A turn still running has no duration yet, and its tool count and files catch up when the turn ends.
 

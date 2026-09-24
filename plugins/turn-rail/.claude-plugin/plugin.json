@@ -17,7 +17,7 @@
     "mode": {
       "type": "string",
       "title": "Rail mode",
-      "description": "vertical: a pane beside the transcript, one row per prompt. horizontal: a row of bars above the prompt input (terminal only). /prompts vertical|horizontal changes it too.",
+      "description": "vertical: a pane beside the transcript, one row per prompt. horizontal: a row of bars above the prompt input (terminal only). /turn-rail vertical|horizontal changes it too.",
       "default": "vertical",
       "options": [
         "vertical",

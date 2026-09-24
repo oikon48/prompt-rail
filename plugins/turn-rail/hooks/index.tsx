@@ -370,7 +370,9 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'prompts',
+      // Named after the plugin: a plugin's commands share one namespace with
+      // every other plugin's and the built-ins, so a generic name would collide.
+      name: 'turn-rail',
       description:
         'Show the prompt rail: vertical (a pane beside the transcript) or horizontal (above the prompt); next or prev jumps to the next or previous prompt.',
       argumentHint: '[vertical|horizontal|next|prev]',
@@ -392,13 +394,13 @@ export const register: Register = (on, options) => {
     const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen)
     if (index && merge(index)) $.ui.invalidate('ui.render')
     // Unasked, the engine seats a pane only from 144 columns (110 once the
-    // person has opened it with /prompts); below that it waits undrawn.
+    // person has opened it with /turn-rail); below that it waits undrawn.
     if (mode === 'vertical' || !isTerminal) await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
     else await $.ui.close({ id: PANE })
     return next(e)
   })
 
-  on('command.run', { command: 'prompts' }, async ($, e) => {
+  on('command.run', { command: 'turn-rail' }, async ($, e) => {
     const asked = e.args.trim()
     if (asked === 'next' || asked === 'prev') {
       const target = stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)
@@ -408,7 +410,7 @@ export const register: Register = (on, options) => {
       return {}
     }
     if (asked && !isMode(asked)) {
-      $.ui.toast('turn-rail: /prompts [vertical|horizontal|next|prev]')
+      $.ui.toast('turn-rail: /turn-rail [vertical|horizontal|next|prev]')
       return {}
     }
     if (isMode(asked)) mode = asked

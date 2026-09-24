@@ -95,9 +95,9 @@ test('wide characters are cut by the cells they take', async ($, on) => {
   expect((await rail.findAll({ type: 'Button' })).map(b => b.props.label)[2]).toBe(' ─ 日本語…')
 })
 
-test('/prompts horizontal draws bars over a text line, tall only where being read', async ($, on) => {
+test('/turn-rail horizontal draws bars over a text line, tall only where being read', async ($, on) => {
   await drawPrompts($, on)
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   // Upper row: only the prompt on screen stands a bar; lower row: every prompt.
   expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ', '┃', '│', '┃'])
@@ -111,7 +111,7 @@ test('/prompts horizontal draws bars over a text line, tall only where being rea
 test('with several prompts on screen only the topmost one stands tall', async ($, on) => {
   await drawPrompts($, on)
   await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   // m2 and m3 both show; m2 is the one being read.
   expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ', '┃', ' ', '│', '┃', '│'])
@@ -134,7 +134,7 @@ const TRANSCRIPT = jsonl([
   },
   { type: 'user', uuid: 'r1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
   { type: 'user', uuid: 'u2', message: { role: 'user', content: '<div> why does this overflow?' } },
-  { type: 'user', uuid: 'c1', message: { role: 'user', content: '<command-name>/prompts</command-name>' } },
+  { type: 'user', uuid: 'c1', message: { role: 'user', content: '<command-name>/turn-rail</command-name>' } },
   { type: 'user', uuid: 'u3', message: { role: 'user', content: 'continue' } },
   { type: 'user', uuid: 'u4', message: { role: 'user', content: 'continue' } },
 ])
@@ -257,7 +257,7 @@ test('a reload lists the prompts again from the remembered transcript', async ($
   // A reloaded module has no list; session.start fires again and rebuilds it.
   world(on, { 'transcript:s1': { path: '/t/s1.jsonl', at: 1 } })
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect((await band.findAll({ type: 'Button' })).length).toBe(8)
 })
@@ -284,7 +284,7 @@ test('a repeated prompt gets its own entry; the provisional row is not listed', 
 test('a tool row at the top of the viewport places the reader under its prompt', async ($, on) => {
   world(on)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   await $.ui.mount({
     plugin: 'turn-rail',
     surface: 'terminal',
@@ -327,7 +327,7 @@ test("while a subagent's transcript is in view the pane holds a note, not the ra
 
 test("while a subagent's transcript is in view the band stays empty", async ($, on) => {
   await drawPrompts($, on)
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, view: { agentId: 'ag1' } } })
   expect(await band.findAll({ type: 'Button' })).toEqual([])
 })
@@ -337,7 +337,7 @@ test("while a subagent's transcript is in view the band stays empty", async ($, 
 const overflowBand = async ($: any, on: any, reading: number) => {
   world(on)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   for (let i = 0; i < 12; i++) {
     const onScreen = i === reading ? { first: 0, last: 1, of: 2 } : null
     await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: `p${i}`, props: prompt(`prompt ${i}`, onScreen) })
@@ -446,17 +446,17 @@ test('a scroll redraws only when the prompt being read changes', async ($, on) =
   expect(disk.invalidations).toBe(before + 1)
 })
 
-test('/prompts <mode> writes the mode setting and switches at once', async ($, on) => {
+test('/turn-rail <mode> writes the mode setting and switches at once', async ($, on) => {
   const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   expect(disk.settings.get('turn-rail.mode')).toBe('horizontal')
   expect(disk.panes.at(-1)).toBe('close turn-rail')
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect((await band.findAll({ type: 'Button' })).length).toBe(8)
-  await $.command.run({ command: 'prompts', args: 'vertical' })
+  await $.command.run({ command: 'turn-rail', args: 'vertical' })
   expect(disk.settings.get('turn-rail.mode')).toBe('vertical')
   expect(disk.panes.at(-1)).toBe('open turn-rail')
 })
@@ -491,16 +491,16 @@ test('the next and previous prompts step over ones that cannot be scrolled to', 
   expect(stepFrom(-1, 0, 1, none)).toBe(-1)
 })
 
-test('/prompts runs mid-turn and takes next and prev', async ($, on) => {
+test('/turn-rail runs mid-turn and takes next and prev', async ($, on) => {
   const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.commands).toEqual([expect.objectContaining({ name: 'prompts', immediate: true, argumentHint: '[vertical|horizontal|next|prev]' })])
+  expect(disk.commands).toEqual([expect.objectContaining({ name: 'turn-rail', immediate: true, argumentHint: '[vertical|horizontal|next|prev]' })])
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.command.run({ command: 'prompts', args: 'next' })
-  await $.command.run({ command: 'prompts', args: 'prev' })
+  await $.command.run({ command: 'turn-rail', args: 'next' })
+  await $.command.run({ command: 'turn-rail', args: 'prev' })
   // Neither is taken for a bad argument, and neither changes the mode.
-  expect(disk.toasts.filter(text => text.includes('/prompts ['))).toEqual([])
+  expect(disk.toasts.filter(text => text.includes('/turn-rail ['))).toEqual([])
   expect(disk.settings.size).toBe(0)
 })
 
@@ -585,7 +585,7 @@ test('a turn is summed up as its duration, tool calls and edited files', () => {
 test('the hover card in the horizontal rail carries the turn\'s details', async ($, on) => {
   world(on, {}, TURNS)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect(await band.find({ type: 'Text', text: /^#1 first · 1m 23s · 4 tools · app\.ts, README\.md\s*$/ })).toBeDefined()
   // No turn_duration row: the time from the prompt to the turn's last row.
@@ -598,7 +598,7 @@ test('a narrow band keeps room for the details by cutting the prompt first', asy
     { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 9000 },
   ]))
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 40 } })
   // Thirty-six cells: `#1 `, the text cut to 28, then ` · 9s`.
   const card = await band.find({ type: 'Text', text: /^#1 a prompt far too long to fi… · 9s\s*$/ })
@@ -633,7 +633,7 @@ test('a turn that just ended shows the duration the engine reported before the t
   world(on, {}, TURNS)
   on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await $.command.run({ command: 'prompts', args: 'horizontal' })
+  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
   // A subagent's turn is not the prompt's.
   await $.turn.complete({ answer: '', durationMs: 99000, isAborted: false, turnId: 'sub', agentId: 'ag1', reason: 'answer' })
   await $.turn.complete({ answer: 'done', durationMs: 12500, isAborted: false, turnId: 'main', reason: 'answer' })
