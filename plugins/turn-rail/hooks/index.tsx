@@ -358,14 +358,18 @@ export const register: Register = (on, options) => {
   // newest prompt's turn is running now.
   const ended = new Map<string, Outcome>()
   let isRunning = false
-  // The running turn's typed text, and how many prompts were listed when it
-  // started: a new prompt's turn starts before its row is stored, so until
-  // that row is listed the newest entry is the prompt before it.
-  let running = { text: '', listedAtStart: 0 }
+  // How many prompts were listed when the session last came to rest (a turn
+  // ended, or the session started), and whether the running turn is a
+  // continuation with no typed text. A new prompt's turn may start before its
+  // row is stored, so the newest entry is the running turn's own only once a
+  // prompt has been listed since the rest; text alone cannot tell, since the
+  // person may send the same text twice.
+  let listedAtRest = 0
+  let isContinuation = false
   const isRunningFor = (id: string) => {
     const newest = entries[entries.length - 1]
     if (!isRunning || newest?.id !== id) return false
-    return running.text === '' || newest.text.trim() === running.text || entries.length > running.listedAtStart
+    return isContinuation || entries.length > listedAtRest
   }
   // A prompt's turn as the rail shows it: the transcript's record, completed
   // by what the engine reported before the transcript had it.
@@ -414,7 +418,8 @@ export const register: Register = (on, options) => {
       const ownerId = owners.get(id)
       // A reply or tool row the transcript read does not know was written
       // after it: the Stop hook reads before the turn's last reply is stored,
-      // and a running turn's rows come later still. Only the newest turn owns it.
+      // and a running turn's rows come later still. A turn's start reads the
+      // file again, so only the newest turn can own it.
       const i = promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
       if (i !== undefined && (best < 0 || i < best)) best = i
     }
@@ -478,6 +483,7 @@ export const register: Register = (on, options) => {
     const transcriptPath = await rememberedTranscript($)
     const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen)
     if (index && merge(index)) $.ui.invalidate('ui.render')
+    if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /turn-rail); below that it waits undrawn.
     if (mode === 'vertical' || !isTerminal) {
@@ -553,6 +559,7 @@ export const register: Register = (on, options) => {
       const index = await readTranscript($, e.transcript_path, seen)
       if (index && merge(index)) $.ui.invalidate('ui.render')
     }
+    listedAtRest = entries.length
     pinStatus($, statusText(), pinned)
     await rememberTranscript($, e.session_id, e.transcript_path)
     return next(e)
@@ -578,7 +585,11 @@ export const register: Register = (on, options) => {
   // prompt's turn is running.
   on('turn.start', async ($, e, next) => {
     isRunning = true
-    running = { text: e.text.trim(), listedAtStart: entries.length }
+    isContinuation = e.text.trim() === ''
+    // Every row of the turns before is stored by now: read them, so a row the
+    // index does not know can only be this turn's (see currentIndex).
+    const index = seen.path ? await readTranscript($, seen.path, seen) : undefined
+    if (index) merge(index)
     $.ui.invalidate('ui.render')
     return next(e)
   })
@@ -591,6 +602,7 @@ export const register: Register = (on, options) => {
     const entry = entries[entries.length - 1]
     if (e.agentId === undefined) {
       isRunning = false
+      listedAtRest = entries.length
       if (entry) {
         reported.set(entry.id, (reported.get(entry.id) ?? 0) + e.durationMs)
         if (e.reason === 'aborted') ended.set(entry.id, 'interrupted')
