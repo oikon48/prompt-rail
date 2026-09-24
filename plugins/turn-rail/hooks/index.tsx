@@ -38,12 +38,6 @@ const RAIL_INSET = 2
 // Other refusals (a race with another move) pass, so they leave the tick be.
 const NOT_DRAWN = /nothing drawn/
 
-// The colors a Raster cell takes: `0x00RRGGBB`, or bit 24 alone for the
-// terminal's default — a theme color name does not reach a Raster, so the
-// viewport thumb's gray is fixed instead of following the theme.
-const CELL_DEFAULT = 0x01000000
-const CELL_THUMB = 0x00606060
-
 // vertical: ticks in a docked pane; horizontal: ticks in a row above the prompt.
 type Mode = 'vertical' | 'horizontal'
 const isMode = (value: unknown): value is Mode => value === 'vertical' || value === 'horizontal'
@@ -71,37 +65,6 @@ const cellWidth = (text: string) => [...text].reduce((sum, char) => sum + cells(
 // `text` padded with spaces to `width` cells, so a card painted over the
 // default line hides it whole.
 const padTo = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - cellWidth(text)))
-
-const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-// Standard padded base64 of `bytes`: the sandbox's Uint8Array#toBase64 where
-// it exists, by hand where it does not.
-const base64 = (bytes: Uint8Array) => {
-  const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64
-  if (typeof native === 'function') return native.call(bytes)
-  let out = ''
-  for (let i = 0; i < bytes.length; i += 3) {
-    const n = ((bytes[i] ?? 0) << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
-    out +=
-      B64.charAt(n >> 18) +
-      B64.charAt((n >> 12) & 63) +
-      (i + 1 < bytes.length ? B64.charAt((n >> 6) & 63) : '=') +
-      (i + 2 < bytes.length ? B64.charAt(n & 63) : '=')
-  }
-  return out
-}
-
-// One row of Raster cells: a space per cell, background lit where `isLit`,
-// row-major little-endian `[codePoint, foreground, background]` u32 triplets
-// as base64.
-const rasterRow = (count: number, isLit: (i: number) => boolean) => {
-  const words = new Uint32Array(count * 3)
-  for (let i = 0; i < count; i++) {
-    words[i * 3] = 0x20
-    words[i * 3 + 1] = CELL_DEFAULT
-    words[i * 3 + 2] = isLit(i) ? CELL_THUMB : CELL_DEFAULT
-  }
-  return base64(new Uint8Array(words.buffer))
-}
 
 // The prompt on one line, cut to `width` terminal cells with an ellipsis.
 const oneLine = (text: string, width: number) => {
@@ -422,12 +385,6 @@ export const register: Register = (on, options) => {
   // read, since a row that left away from the viewport's edges is not told.
   let pass = { at: 0, rows: new Map<string, boolean>() }
   let lastCurrent = -1
-  // The bottom edge of the span on screen, for the viewport thumb.
-  let lastBottom = -1
-  // The rows of the bottom prompt the engine still shows, as far as it told
-  // us: a shown report adds one, an off-screen report drops one. The bottom
-  // edge can only have moved up once the last of them is gone.
-  let bottomRows = new Set<string>()
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
   const seen: Seen = { path: '', size: -1, mtimeMs: -1 }
@@ -449,75 +406,35 @@ export const register: Register = (on, options) => {
     pass.rows.set(id, isShown)
   }
 
-  // The span of prompts on screen: the smallest and greatest index among the
-  // latest pass's shown rows, a reply or tool row counting as its prompt's.
-  // A scroll reports the rows at the viewport's edges, a redraw every row, so
-  // the shown rows of either bound the viewport. Each bound is kept while no
-  // known row shows, and the bottom keeps while a row of its prompt is known
-  // on the screen — a sparse pass may simply not carry the bottom edge's
-  // reports, so its greatest shown index is only a lower bound.
-  const shownRange = () => {
+  // Where the person is reading: the prompt that the topmost row of the latest
+  // pass belongs to, a reply counting as its prompt's. A scroll reports the
+  // rows at the viewport's edges, a redraw every row, so the topmost shown row
+  // of either is the viewport's top. Kept while no known row shows.
+  const currentIndex = () => {
     const promptIndex = new Map(entries.map((entry, i) => [entry.id, i]))
-    // Where a row counts on the rail: a prompt at its own index, a reply or
-    // tool row at its owner's, a row no prompt owns at the newest one's. A row
-    // the transcript read does not know was written after it: the Stop hook
-    // reads before the turn's last reply is stored, and a running turn's rows
-    // come later still, so only the newest turn can own one.
-    const indexOf = (id: string) => {
-      const ownerId = owners.get(id)
-      return promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
-    }
-    // A list that shrank under the saved bottom (a rewind) leaves it off the
-    // end: it is gone, not merely unproven.
-    if (lastBottom >= entries.length) {
-      lastBottom = -1
-      bottomRows = new Set()
-    }
-    let top = -1
-    let bottom = -1
+    let best = -1
     for (const [id, isShown] of pass.rows) {
-      if (id === PROVISIONAL_ID) continue
-      const i = indexOf(id)
-      if (!isShown) {
-        if (i === lastBottom) bottomRows.delete(id)
-        continue
-      }
-      if (i === undefined) continue
-      if (i === lastBottom) bottomRows.add(id)
-      if (top < 0 || i < top) top = i
-      if (bottom < 0 || i > bottom) bottom = i
+      if (!isShown || id === PROVISIONAL_ID) continue
+      const ownerId = owners.get(id)
+      // A reply or tool row the transcript read does not know was written
+      // after it: the Stop hook reads before the turn's last reply is stored,
+      // and a running turn's rows come later still. A turn's start reads the
+      // file again, so only the newest turn can own it.
+      const i = promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
+      if (i !== undefined && (best < 0 || i < best)) best = i
     }
-    if (top >= 0) {
-      lastCurrent = top
-      // The edge moved: a lower prompt shows, or the last row known on the
-      // saved one left. Re-anchor the known rows at the new bottom.
-      if (bottom > lastBottom || (bottom < lastBottom && bottomRows.size === 0)) {
-        lastBottom = bottom
-        bottomRows = new Set(
-          [...pass.rows]
-            .filter(([id, isShown]) => isShown && id !== PROVISIONAL_ID && indexOf(id) === bottom)
-            .map(([id]) => id),
-        )
-      }
-    }
-    const bound = (last: number) => (last >= 0 && last < entries.length ? last : -1)
-    return [bound(lastCurrent), bound(lastBottom)] as const
+    if (best >= 0) lastCurrent = best
+    return lastCurrent < entries.length ? lastCurrent : -1
   }
-  // Where the person is reading: the prompt owning the viewport's top row.
-  const currentIndex = () => shownRange()[0]
 
-  // Record one onScreen report; true when it moved the span on screen — the
-  // prompt being read or the viewport's bottom edge, the things a report can
-  // change in the drawing. The bottom edge only shows in the horizontal
-  // band's thumb row; elsewhere its moves are not worth a redraw. A scroll
-  // that only reports the viewport's edges and lands on another prompt
-  // redraws, and that redraw's full pass of reports settles the prompt at the
-  // viewport's top.
+  // Record one onScreen report; true when it moved the prompt being read, the
+  // one thing a report changes in the drawing. A scroll that only reports the
+  // viewport's edges and lands on another prompt redraws, and that redraw's
+  // full pass of reports settles the prompt at the viewport's top.
   const seeMoves = (id: string, isShown: boolean) => {
-    const [beforeTop, beforeBottom] = shownRange()
+    const before = currentIndex()
     see(id, isShown)
-    const [top, bottom] = shownRange()
-    return top !== beforeTop || (mode === 'horizontal' && bottom !== beforeBottom)
+    return currentIndex() !== before
   }
 
   // A change of the setting reloads this module with the new value.
@@ -635,8 +552,6 @@ export const register: Register = (on, options) => {
       isRunning = false
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
-      lastBottom = -1
-      bottomRows = new Set()
       unreachable.clear()
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       $.ui.invalidate('ui.render')
@@ -853,7 +768,7 @@ export const register: Register = (on, options) => {
     pinStatus($, statusText(), pinned)
     // Nothing while a survey holds the band or a subagent's transcript is in view.
     if (e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
-    const { Box, Text, Button, Raster } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const cards = (width: number) =>
       entries.map((entry, i) => (
         <Box key={`card-${i}`} display="none" hover={{ scope: `turn-rail-${i}`, display: 'flex' }}>
@@ -863,15 +778,12 @@ export const register: Register = (on, options) => {
       ))
 
     if (mode === 'horizontal') {
-      // Five rows: the viewport's span on the rail as one row of colored
-      // cells, which also parts the rail from the transcript; one of marks;
-      // two of bars; then the text line beside the prompt. A bar stands two
-      // rows only for the prompt being read and the hovered one. The text
-      // line shows the prompt being read, dim, and the hovered one's card
-      // painted over it.
+      // Four rows: one of marks over the bars, which also parts the rail from
+      // the transcript, two of bars, then the text line beside the prompt. A bar stands two rows only
+      // for the prompt being read and the hovered one. The text line shows the
+      // prompt being read, dim, and the hovered one's card painted over it.
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
-      const [top, bottom] = shownRange()
-      const current = top
+      const current = currentIndex()
       // More prompts than cells: a window of bars centered on the prompt being
       // read (the newest when none is known), `‹` and `›` marking what it hides.
       const isOverflowing = entries.length > width
@@ -880,14 +792,6 @@ export const register: Register = (on, options) => {
       const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
       const shown = entries.slice(first, first + capacity)
       const hidesAfter = first + capacity < entries.length
-      // The span's cells sit over the bars they shade: cell `inset` + i lights
-      // for prompt `first` + i while it is between the viewport's edges.
-      const inset = isOverflowing ? 1 : 0
-      const span = Math.max(bottom, top)
-      const inThumb = (cell: number) => {
-        const i = first + cell - inset
-        return top >= 0 && i >= top && i <= span
-      }
       const label = (i: number) => `#${i + 1} ${oneLine(entries[i]?.text ?? '', width - `#${i + 1} `.length)}`
       // The hovered prompt's card also sums up its turn.
       const card = (i: number) => {
@@ -896,9 +800,6 @@ export const register: Register = (on, options) => {
       }
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
-          {Raster === undefined ? null : (
-            <Raster key="thumb" columns={inset + shown.length} rows={1} cells={rasterRow(inset + shown.length, inThumb)} />
-          )}
           <Box flexDirection="row">
             {isOverflowing ? <Text> </Text> : null}
             {shown.map(entry => {

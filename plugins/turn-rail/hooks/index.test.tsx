@@ -68,9 +68,8 @@ const drawPrompts = async ($: any, on: any) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({}))
   on('ui.toast', () => {})
-  const m1 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
-  const m2 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', { first: 0, last: 3, of: 4 }) })
-  return { m1, m2 }
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
+  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', { first: 0, last: 3, of: 4 }) })
 }
 
 test('a narrow vertical rail leaves the prompt text to hidden cards in the band', async ($, on) => {
@@ -117,71 +116,6 @@ test('with several prompts on screen only the topmost one stands tall', async ($
   // m2 and m3 both show; m2 is the one being read.
   expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ', '┃', ' ', '│', '┃', '│'])
   expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeDefined()
-})
-
-// A Raster row's background colors, decoded from its base64 u32 triplets.
-const CELL_DEFAULT = 0x01000000
-const CELL_THUMB = 0x00606060
-const bgsOf = (raster: any) => {
-  const s: string = raster.props.cells
-  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-  const bytes: number[] = []
-  for (let i = 0; i + 3 < s.length; i += 4) {
-    const n =
-      (abc.indexOf(s[i]!) << 18) |
-      (abc.indexOf(s[i + 1]!) << 12) |
-      ((s[i + 2] === '=' ? 0 : abc.indexOf(s[i + 2]!)) << 6) |
-      (s[i + 3] === '=' ? 0 : abc.indexOf(s[i + 3]!))
-    bytes.push(n >> 16, (n >> 8) & 0xff, n & 0xff)
-  }
-  return Array.from({ length: raster.props.columns }, (_, i) => bytes[i * 12 + 8]! | (bytes[i * 12 + 9]! << 8) | (bytes[i * 12 + 10]! << 16) | (bytes[i * 12 + 11]! << 24))
-}
-
-test('the viewport span lights the cells over the prompts on screen', async ($, on) => {
-  await drawPrompts($, on)
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  const thumb = await band.find({ type: 'Raster' })
-  // m2 alone is on screen: one lit cell, over its bar.
-  expect(thumb?.props.columns).toBe(2)
-  expect(bgsOf(thumb)).toEqual([CELL_DEFAULT, CELL_THUMB])
-})
-
-test('the span runs from the topmost shown prompt through the bottommost', async ($, on) => {
-  await drawPrompts($, on)
-  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  const thumb = await band.find({ type: 'Raster' })
-  // m2 and m3 show: the span covers the cells over both bars.
-  expect(bgsOf(thumb)).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-})
-
-test('a lone report from the top edge keeps the span over the prompts below', async ($, on) => {
-  const { m2 } = await drawPrompts($, on)
-  const m3 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('third prompt', { first: 0, last: 1, of: 2 }) })
-  await $.command.run({ command: 'turn-rail', args: 'horizontal' })
-  const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-  // A new pass past the 150 ms window: a tool row of the bottom prompt
-  // leaving and the top edge alone re-reporting prove nothing about the
-  // bottom edge, so the span is kept.
-  await new Promise(resolve => setTimeout(resolve, 200))
-  await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'ToolUse', requestId: 't3', props: { tool_use_id: 't3', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: null } })
-  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB])
-  // A tool row seen on the bottom prompt keeps it once the prompt's own row
-  // is gone; the span moves up only when the last row known on it leaves.
-  await new Promise(resolve => setTimeout(resolve, 200))
-  const m4 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm4', props: prompt('fourth prompt', { first: 0, last: 1, of: 2 }) })
-  const t4 = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'ToolUse', requestId: 't4', props: { tool_use_id: 't4', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: { first: 0, last: 1, of: 2 } } })
-  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
-  await m4.redraw(prompt('fourth prompt', null))
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_THUMB, CELL_THUMB])
-  await new Promise(resolve => setTimeout(resolve, 200))
-  await t4.redraw({ tool_use_id: 't4', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false, onScreen: null })
-  await m2.redraw(prompt('second prompt', { first: 0, last: 3, of: 4 }))
-  expect(bgsOf(await band.find({ type: 'Raster' }))).toEqual([CELL_DEFAULT, CELL_THUMB, CELL_DEFAULT, CELL_DEFAULT])
 })
 
 // A transcript JSONL from rows given in order; each row's parent is the one
@@ -422,7 +356,7 @@ const overflowBand = async ($: any, on: any, reading: number) => {
   const band = await $.ui.mount({ plugin: 'turn-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 14 } })
   const lower = (await band.findAll({ type: 'Button' })).map((b: any) => String(b.props.key)).filter((key: string) => /^jump-\d+$/.test(key))
   const marks = (await band.findAll({ type: 'Text' })).map((t: any) => t.text).filter((text: string) => text === '‹' || text === '›')
-  return { lower, marks, band }
+  return { lower, marks }
 }
 
 test('an overflowing horizontal rail keeps the prompt being read near the start', async ($, on) => {
@@ -441,15 +375,6 @@ test('an overflowing horizontal rail keeps the prompt being read near the end', 
   const { lower, marks } = await overflowBand($, on, 10)
   expect(lower).toEqual(['jump-4', 'jump-5', 'jump-6', 'jump-7', 'jump-8', 'jump-9', 'jump-10', 'jump-11'])
   expect(marks).toEqual(['‹'])
-})
-
-test('an overflowing rail shifts the lit cell under its bar', async ($, on) => {
-  const { band } = await overflowBand($, on, 6)
-  const thumb = await band.find({ type: 'Raster' })
-  // A leading cell for the elision mark, then the eight bars: prompt 6 is the
-  // fifth shown (prompts 2 to 9), so the sixth cell lights.
-  expect(thumb?.props.columns).toBe(9)
-  expect(bgsOf(thumb)).toEqual([CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT, CELL_THUMB, CELL_DEFAULT, CELL_DEFAULT, CELL_DEFAULT])
 })
 
 // The engine's answer for a row the transcript does not draw (a slash
