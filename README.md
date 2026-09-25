@@ -35,7 +35,7 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
 
 3. Start a new session. The rail opens on its own.
 
-Mouse works best with `"tui": "fullscreen"`. While the repository is private, adding the marketplace needs git access to it.
+Mouse works best with `"tui": "fullscreen"`.
 
 ## Two layouts
 
