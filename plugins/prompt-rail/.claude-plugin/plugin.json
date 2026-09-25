@@ -14,6 +14,7 @@
     "prompts",
     "function-hooks"
   ],
+  "types": "./types/prompt-rail.d.ts",
   "userConfig": {
     "mode": {
       "type": "string",

@@ -41,6 +41,11 @@ const RAIL_INSET = 2
 // command's own row, which the transcript file holds but the surface skips.
 // Other refusals (a race with another move) pass, so they leave the tick be.
 const NOT_DRAWN = /nothing drawn/
+// A count the rail's sites (the pane and the band) read while drawing, so
+// bumping it draws them again, and them alone. `$.ui.invalidate('ui.render')`
+// also draws every transcript row this module hooks, and rows drawn again
+// while the person scrolls just after a jump move the viewport a turn away.
+const MOVED = { plugin: 'prompt-rail', key: 'moved' } as const
 
 // vertical: ticks in a docked pane; horizontal: ticks in a row above the
 // prompt; off: no rail at all. One setting, so /config keeps a single row.
@@ -338,10 +343,21 @@ async function jumpTo($: EngineInterface, id: string, unreachable: Set<string>) 
   try {
     const result = await $.ui.scroll({ to: { requestId: id }, block: 'start' })
     if (result.deny) $.ui.toast(`prompt-rail: ${result.deny}`)
-    if (noteScroll(unreachable, id, result.deny)) $.ui.invalidate('ui.render')
+    if (noteScroll(unreachable, id, result.deny)) await redrawRail($)
   } catch (err) {
     $.ui.toast(`prompt-rail: ${(err as Error).message}`)
   }
+}
+
+// Draw the rail's sites again, and them alone (see MOVED).
+async function redrawRail($: EngineInterface) {
+  const { value = 0 } = await $.state.get(MOVED)
+  await $.state.set(MOVED, value + 1)
+}
+
+// The same from a render hook, which may not write state: once its dispatch ends.
+function redrawRailLater($: EngineInterface) {
+  $.clock.after(0, () => void redrawRail($))
 }
 
 // The transcript path remembered for this session, if any.
@@ -433,9 +449,9 @@ export const register: Register = (on, options) => {
   }
 
   // Record one onScreen report; true when it moved the prompt being read, the
-  // one thing a report changes in the drawing. A scroll that only reports the
-  // viewport's edges and lands on another prompt redraws, and that redraw's
-  // full pass of reports settles the prompt at the viewport's top.
+  // one thing a report changes in the drawing. A scroll reports the message
+  // at the viewport's top edge among its edges, which settles the prompt
+  // there; only the rail is drawn again for it (see MOVED).
   const seeMoves = (id: string, isShown: boolean) => {
     const before = currentIndex()
     see(id, isShown)
@@ -478,7 +494,7 @@ export const register: Register = (on, options) => {
     // the transcript this session's classic SessionStart remembered.
     const transcriptPath = await rememberedTranscript($)
     const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen)
-    if (index && merge(index)) $.ui.invalidate('ui.render')
+    if (index && merge(index)) await redrawRail($)
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /prompt-rail); below that it waits undrawn.
@@ -512,7 +528,7 @@ export const register: Register = (on, options) => {
     }
     if (isMode(asked)) mode = asked
     await seatRail($, mode, isTerminal)
-    $.ui.invalidate('ui.render')
+    await redrawRail($)
     // Last: a changed setting reloads this module, which then starts in it.
     if (isMode(asked)) await writeMode($, asked)
     return {}
@@ -545,10 +561,10 @@ export const register: Register = (on, options) => {
       lastCurrent = -1
       unreachable.clear()
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
-      $.ui.invalidate('ui.render')
+      await redrawRail($)
     } else {
       const index = await readTranscript($, e.transcript_path, seen)
-      if (index && merge(index)) $.ui.invalidate('ui.render')
+      if (index && merge(index)) await redrawRail($)
     }
     listedAtRest = entries.length
     await rememberTranscript($, e.session_id, e.transcript_path)
@@ -557,7 +573,7 @@ export const register: Register = (on, options) => {
 
   on('classic.Stop', async ($, e, next) => {
     const index = await readTranscript($, e.transcript_path, seen)
-    if (index && merge(index)) $.ui.invalidate('ui.render')
+    if (index && merge(index)) await redrawRail($)
     return next(e)
   })
 
@@ -570,7 +586,7 @@ export const register: Register = (on, options) => {
     // index does not know can only be this turn's (see currentIndex).
     const index = seen.path ? await readTranscript($, seen.path, seen) : undefined
     if (index) merge(index)
-    $.ui.invalidate('ui.render')
+    await redrawRail($)
     return next(e)
   })
 
@@ -588,7 +604,7 @@ export const register: Register = (on, options) => {
         if (e.reason === 'aborted') ended.set(entry.id, 'interrupted')
         if (e.reason === 'error') ended.set(entry.id, 'error')
       }
-      $.ui.invalidate('ui.render')
+      await redrawRail($)
     }
     return result
   })
@@ -599,7 +615,7 @@ export const register: Register = (on, options) => {
     if (PROMPT_KINDS.has(e.props.origin.kind) && !e.props.text.trimStart().startsWith('/')) {
       const isAdded = addPrompt(e.requestId, e.props.text)
       const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
-      if (isAdded || isMoved) $.ui.invalidate('ui.render')
+      if (isAdded || isMoved) redrawRailLater($)
     }
     return next(e)
   })
@@ -608,20 +624,20 @@ export const register: Register = (on, options) => {
   // answers. Tool rows are drawn under their tool_use id; a collapsed group
   // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) redrawRailLater($)
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) redrawRailLater($)
     return next(e)
   })
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) redrawRailLater($)
     return next(e)
   })
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
-    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) $.ui.invalidate('ui.render')
+    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) redrawRailLater($)
     return next(e)
   })
 
@@ -636,7 +652,9 @@ export const register: Register = (on, options) => {
     return `${oneLine(entry.text, room)} · ${details}`
   }
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    // Read so a moved prompt being read draws the pane again (see MOVED).
+    await $.state.get(MOVED)
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
     viewAgent = e.props.view.agentId
@@ -644,7 +662,7 @@ export const register: Register = (on, options) => {
     if (nextColumns !== railColumns) {
       // The band decides from this whether it carries the cards.
       railColumns = nextColumns
-      $.ui.invalidate('ui.render')
+      redrawRailLater($)
     }
     // The rail lists the main conversation's prompts, which a subagent's
     // transcript does not hold, so pressing one there could not scroll to it.
@@ -710,7 +728,8 @@ export const register: Register = (on, options) => {
   // The band above the prompt (terminal only). Horizontal: the rail itself, a
   // row of ticks with the hovered prompt beside them. Vertical with a dock too
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
-  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    await $.state.get(MOVED)
     viewAgent = e.props.view.agentId
     // Nothing while the rail is off, a survey holds the band or a subagent's transcript is in view.
     if (mode === 'off' || e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
