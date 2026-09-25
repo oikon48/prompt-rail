@@ -82,6 +82,7 @@ test('a narrow vertical rail leaves the prompt text to hidden cards in the band'
 
 test('a wide vertical rail shows each prompt beside its tick and keeps the band empty', async ($, on) => {
   await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 37) })
   expect((await rail.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ─ first prompt', ' ━ second prompt'])
   const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
@@ -591,20 +592,23 @@ test('a mode the setting cannot keep is kept for the session', async ($, on) => 
 
 test('the mode no longer lives in the store: an earlier version\'s moves to the setting', async ($, on) => {
   const disk = beneath()
-  const store = world(on, { mode: 'horizontal' }, TRANSCRIPT, disk)
+  const store = world(on, { mode: 'vertical' }, TRANSCRIPT, disk)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.settings.get('prompt-rail.mode')).toBe('horizontal')
+  expect(disk.settings.get('prompt-rail.mode')).toBe('vertical')
   expect(store.has('mode')).toBe(false)
-  // The horizontal rail needs no pane; one left open by the previous module closes.
-  expect(disk.panes).toEqual(['close prompt-rail'])
+  expect(disk.panes).toEqual(['open prompt-rail'])
 })
 
-test('a session starts in the mode the setting holds, vertical by default', async ($, on) => {
+test('a session starts in the mode the setting holds, horizontal by default', async ($, on) => {
   const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   expect(disk.settings.size).toBe(0)
-  expect(disk.panes).toEqual(['open prompt-rail'])
+  // The band carries the rail on the terminal, at any width: no pane opens.
+  expect(disk.panes).toEqual(['close prompt-rail'])
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.findAll({ type: 'Button' })).length).toBeGreaterThan(0)
 })
 
 test('/prompt-rail off hides the rail until a mode turns it back on', async ($, on) => {
@@ -775,6 +779,7 @@ test('a narrow band keeps room for the details by cutting the prompt first', asy
 test('the hover card of a narrow vertical rail carries the turn\'s details', async ($, on) => {
   world(on, {}, TURNS)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 4) })
   const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect(await band.find({ type: 'Text', text: /^first · 1m 23s · 4 tools · app\.ts, README\.md$/ })).toBeDefined()
@@ -923,6 +928,7 @@ test('a turn is summed up with how it ended', () => {
 test('no rail draws a colored mark; how a turn went is left to its card', async ($, on) => {
   world(on, {}, OUTCOMES)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   for (const [surface, placement] of [['terminal', 'dock'], ['desktop', 'inline']] as const) {
     const site = await $.ui.mount({ plugin: 'prompt-rail', surface, component: 'Pane', requestId: 'prompt-rail', props: pane(placement, 40) })
     expect(await site.findAll({ type: 'Text' })).toEqual([])
@@ -943,6 +949,7 @@ test('the running turn\'s card says so until it ends, then how it ended', async 
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
   await $.classic.SessionStart({ source: 'startup', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   // The prompt's row is stored and drawn, then its turn starts.
   const row = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u1', props: prompt('first', null) })
   await row.unmount()
@@ -998,6 +1005,7 @@ test('a new prompt\'s turn runs under that prompt, not the one before it', async
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   // The turn for "second" starts before its row is stored under its uuid.
   await $.turn.start({ text: 'second', turnId: 't2' })
   expect(await cardDetails($)).toEqual(['first'])
@@ -1014,6 +1022,7 @@ test('a repeated prompt\'s turn does not run under the earlier one with the same
   world(on)
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   // The transcript ends in "continue"; the person sends "continue" again.
   await $.turn.start({ text: 'continue', turnId: 't5' })
   const isRunning = async () => (await cardDetails($)).map((details: string) => details.endsWith('running'))
