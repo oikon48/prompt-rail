@@ -225,12 +225,14 @@ const COMPACTED = jsonl([
 
 // What the world beneath the plugin holds and counts: the transcript file's
 // text (a test may change it), how often the plugin read it, how often it
-// asked for a redraw, the settings it wrote, and the panes it opened or closed.
+// asked for a redraw of everything it hooks and of the rail alone, the
+// settings it wrote, and the panes it opened or closed.
 type Beneath = {
   transcript: string
   mtimeMs: number
   reads: number
   invalidations: number
+  railRedraws: number
   settings: Map<string, unknown>
   panes: string[]
   commands: unknown[]
@@ -245,6 +247,7 @@ const beneath = (transcript = TRANSCRIPT): Beneath => ({
   mtimeMs: 1,
   reads: 0,
   invalidations: 0,
+  railRedraws: 0,
   settings: new Map(),
   panes: [],
   commands: [],
@@ -277,6 +280,10 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
   on('ui.invalidate', () => {
     disk.invalidations++
     return { value: undefined }
+  })
+  on('state.set', ($: any, e: any, next: any) => {
+    disk.railRedraws++
+    return next(e)
   })
   on('session.id', () => ({ value: 's1' }))
   on('classic.SessionStart', () => ({}))
@@ -492,31 +499,43 @@ test('a turn that changes neither the list nor the prompt being read redraws not
   world(on, {}, TRANSCRIPT, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await railLabels($)
-  const before = disk.invalidations
+  const before = { invalidations: disk.invalidations, railRedraws: disk.railRedraws }
   // Same list, rewritten on disk (a row the index skips was appended).
   disk.transcript = `${TRANSCRIPT}\n${JSON.stringify({ type: 'system', uuid: 's9', parentUuid: 'u4', subtype: 'turn_duration' })}`
   disk.mtimeMs = 2
   await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
   expect(disk.reads).toBe(2)
-  expect(disk.invalidations).toBe(before)
+  expect(disk.invalidations).toBe(before.invalidations)
+  expect(disk.railRedraws).toBe(before.railRedraws)
 })
 
-test('a scroll redraws only when the prompt being read changes', async ($, on) => {
+test('a scroll redraws the rail only when the prompt being read changes, and never the transcript', async ($, on) => {
   const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
+  const clock = mock.clock(on)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
   const shown = { first: 0, last: 1, of: 2 }
   const u1 = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u1', props: prompt('first stored prompt', shown) })
   const u2 = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u2', props: prompt('<div> why does this overflow?', shown) })
-  await railLabels($)
-  const before = disk.invalidations
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const heavy = async () => (await band.findAll({ type: 'Button' })).map((b: any) => b.props.label).indexOf('┃')
+  await clock.settle()
+  expect(await heavy()).toBe(0)
+  const before = { invalidations: disk.invalidations, railRedraws: disk.railRedraws }
   // The lower row leaves the viewport; the topmost one, and so the prompt being read, stays.
   await u2.redraw(prompt('<div> why does this overflow?', null))
-  expect(disk.invalidations).toBe(before)
+  await clock.settle()
+  expect(disk.railRedraws).toBe(before.railRedraws)
   // Now the top row leaves as the next one enters: the prompt being read moves.
   await u1.redraw(prompt('first stored prompt', null))
   await u2.redraw(prompt('<div> why does this overflow?', shown))
-  expect(disk.invalidations).toBe(before + 1)
+  await clock.settle()
+  expect(disk.railRedraws).toBe(before.railRedraws + 1)
+  expect(await heavy()).toBe(1)
+  // Drawing every transcript row again mid-scroll moves the viewport the
+  // person is scrolling, right after a jump, a whole turn away.
+  expect(disk.invalidations).toBe(before.invalidations)
 })
 
 test('/prompt-rail <mode> writes the mode setting and switches at once', async ($, on) => {
@@ -785,17 +804,47 @@ test('the hover card of a narrow vertical rail carries the turn\'s details', asy
   expect(await band.find({ type: 'Text', text: /^first · 1m 23s · 4 tools · app\.ts, README\.md$/ })).toBeDefined()
 })
 
-test('a turn that ends redraws, so its card carries the new details', async ($, on) => {
+test('a turn that ends redraws the rail, so its card carries the new details', async ($, on) => {
   const first = { type: 'user', uuid: 'u1', timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content: 'first' } }
   const disk = beneath(jsonl([first]))
   world(on, {}, disk.transcript, disk)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await railLabels($)
-  const before = disk.invalidations
+  const before = { invalidations: disk.invalidations, railRedraws: disk.railRedraws }
   disk.transcript = jsonl([first, { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 4000 }])
   disk.mtimeMs = 2
   await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
-  expect(disk.invalidations).toBe(before + 1)
+  expect(disk.railRedraws).toBe(before.railRedraws + 1)
+  expect(disk.invalidations).toBe(before.invalidations)
+})
+
+test('nothing the rail learns draws the transcript rows again', async ($, on) => {
+  // Every row the module hooks would be drawn again, and rows drawn again
+  // while the person scrolls just after a jump move the viewport a turn away.
+  const first = { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first' } }
+  const disk = beneath(jsonl([first]))
+  world(on, {}, disk.transcript, disk)
+  const clock = mock.clock(on)
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  on('ui.scroll', () => ({ value: { deny: NOT_DRAWN } }))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
+  // A new prompt is drawn, its turn runs and ends, and the transcript has it.
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u2', props: prompt('second', null) })
+  await $.turn.start({ text: 'second', turnId: 't1' })
+  await $.turn.complete({ answer: 'done', durationMs: 3000, isAborted: false, turnId: 't1', reason: 'answer' })
+  disk.transcript = jsonl([first, { type: 'user', uuid: 'u2', message: { role: 'user', content: 'second' } }])
+  disk.mtimeMs = 2
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
+  // The pane narrows, and a jump is refused for want of a drawn row.
+  const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 40) })
+  await rail.redraw(pane('dock', 4))
+  await rail.press({ key: 'jump-0' })
+  await clock.settle()
+  expect(disk.railRedraws).toBeGreaterThan(0)
+  expect(disk.invalidations).toBe(0)
 })
 
 test('a turn that just ended shows the duration the engine reported before the transcript has it', async ($, on) => {

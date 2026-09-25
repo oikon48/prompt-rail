@@ -14,5 +14,5 @@
     "jsxFactory": "h",
     "jsxFragmentFactory": "Fragment"
   },
-  "include": [".claude/types", "plugins/prompt-rail/hooks"]
+  "include": [".claude/types", "plugins/prompt-rail/hooks", "plugins/prompt-rail/types"]
 }
