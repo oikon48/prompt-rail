@@ -39,11 +39,11 @@ Mouse works best with `"tui": "fullscreen"`.
 
 ## Two layouts
 
-### Horizontal, above the prompt
+### Horizontal, above the prompt (default)
 
 <img src="docs/horizontal.png" alt="The horizontal rail: a text line with the hovered prompt and its turn summary over a row of bars" width="800">
 
-### Vertical, beside the transcript (default)
+### Vertical, beside the transcript
 
 <img src="docs/vertical.png" alt="The vertical rail: one row per prompt in a pane beside the transcript, the prompt being read marked with a thick tick" width="480">
 

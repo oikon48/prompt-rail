@@ -443,7 +443,7 @@ export const register: Register = (on, options) => {
   }
 
   // A change of the setting reloads this module with the new value.
-  let mode: Mode = isMode(options.mode) ? options.mode : 'vertical'
+  let mode: Mode = isMode(options.mode) ? options.mode : 'horizontal'
   // The subagent whose transcript is in view, as the rail's sites last drew;
   // undefined for the main conversation, whose rows alone the rail lists.
   let viewAgent: string | undefined
