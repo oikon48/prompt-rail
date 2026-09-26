@@ -219,21 +219,55 @@ const liveBranch = (rows: any[]) => {
   return live
 }
 
-// The person's prompts on the live branch of a transcript JSONL, in order,
+// What the index reads of a transcript row, and nothing else: a long
+// session's rows are kept between reads, and most of their bytes are tool
+// results and replies the rail never shows. Undefined for a line that is not
+// a row (a torn last line while the engine appends, or no uuid).
+const parseRow = (line: string): any => {
+  let row: any
+  try {
+    row = JSON.parse(line)
+  } catch {
+    return undefined
+  }
+  if (typeof row?.uuid !== 'string') return undefined
+  const content = row.message?.content
+  const blocks = Array.isArray(content)
+    ? content.flatMap((block: any) => {
+        if (block?.type === 'text' && typeof block.text === 'string') return [{ type: 'text', text: block.text }]
+        if (block?.type === 'tool_result') return [{ type: 'tool_result' }]
+        if (block?.type === 'tool_use' && typeof block.id === 'string') {
+          const path = block.input?.file_path
+          return [{ type: 'tool_use', id: block.id, name: block.name, input: typeof path === 'string' ? { file_path: path } : {} }]
+        }
+        return []
+      })
+    : content
+  return {
+    uuid: row.uuid,
+    parentUuid: row.parentUuid,
+    logicalParentUuid: row.logicalParentUuid,
+    isSidechain: row.isSidechain,
+    type: row.type,
+    subtype: row.subtype,
+    durationMs: row.durationMs,
+    isApiErrorMessage: row.isApiErrorMessage,
+    isMeta: row.isMeta,
+    isCompactSummary: row.isCompactSummary,
+    timestamp: row.timestamp,
+    message: row.message && { role: row.message.role, content: typeof content === 'string' ? content : blocks },
+    attachment: row.attachment?.type === 'queued_command' ? { type: row.attachment.type, prompt: row.attachment.prompt } : undefined,
+  }
+}
+
+// The rows of a transcript JSONL's text, in order.
+const parseRows = (jsonl: string) => jsonl.split('\n').flatMap(line => (line.trim() ? (parseRow(line) ?? []) : []))
+
+// The person's prompts on the live branch of a transcript's rows, in order,
 // keyed by message uuid, and the prompt each reply row and tool call answers
 // (a tool row is drawn under its tool_use id). Tool results, meta rows,
 // sidechains and the engine's wrapper rows are not prompts.
-const indexTranscript = (jsonl: string): TranscriptIndex => {
-  const rows: any[] = []
-  for (const line of jsonl.split('\n')) {
-    if (!line.trim()) continue
-    try {
-      const row = JSON.parse(line)
-      if (typeof row?.uuid === 'string') rows.push(row)
-    } catch {
-      // A torn last line while the engine appends; the next read has it whole.
-    }
-  }
+const indexRows = (rows: any[]): TranscriptIndex => {
   const live = liveBranch(rows)
   const prompts: Entry[] = []
   const owners: [string, number][] = []
@@ -314,20 +348,148 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
   return { prompts, turns, owners, known: new Set(rows.map(row => row.uuid)) }
 }
 
-// The size and modification time of the transcript as last read.
-type Seen = { path: string; size: number; mtimeMs: number }
+// The engine's cap on one $.fs.read; a larger transcript is streamed.
+const READ_CAP = 4 * 1024 * 1024
+const encoder = new TextEncoder()
+
+// The transcript as last read: its size and modification time, the rows of
+// its complete lines and the byte where they end, and where the last row
+// starts, which a later read of a long session's file checks is still there.
+// Whether a read is under way, and the path whose file could not be read,
+// said once.
+type Seen = {
+  path: string
+  size: number
+  mtimeMs: number
+  rows: any[]
+  offset: number
+  lastStart: number
+  lastUuid: string | undefined
+  isReading: boolean
+  warned: string
+}
+const unseen = (): Seen => ({
+  path: '',
+  size: -1,
+  mtimeMs: -1,
+  rows: [],
+  offset: 0,
+  lastStart: 0,
+  lastUuid: undefined,
+  isReading: false,
+  warned: '',
+})
+
+// Take the complete lines of `text`, which starts at byte `at` of the file,
+// into `seen`, and return the rest: a line the engine is still writing, or
+// the last of a file with no newline at its end.
+const takeLines = (seen: Seen, text: string, at: number) => {
+  const lines = text.split('\n')
+  const rest = lines.pop() ?? ''
+  for (const line of lines) {
+    const row = line.trim() ? parseRow(line) : undefined
+    if (row) {
+      seen.rows.push(row)
+      seen.lastStart = at
+      seen.lastUuid = row.uuid
+    }
+    at += encoder.encode(line).length + 1
+  }
+  seen.offset = at
+  return rest
+}
+
+// The index of the rows read, and of a last line with no newline yet when it
+// parses whole (it is read again once it has one).
+const indexSeen = (seen: Seen, rest: string) => {
+  const last = rest.trim() ? parseRow(rest) : undefined
+  return indexRows(last ? [...seen.rows, last] : seen.rows)
+}
+
+// Read the file on from the last row read, with tail, since $.fs.read takes
+// no more than READ_CAP. That row comes first and must still be there, else
+// the file was replaced: false then, and nothing is taken. Otherwise the rest
+// after the last complete line.
+async function streamRows($: EngineInterface, path: string, seen: Seen) {
+  let expected = seen.lastUuid
+  let at = expected === undefined ? seen.offset : seen.lastStart
+  let carry = ''
+  const child = $.process.spawn({ argv: ['tail', '-c', `+${at + 1}`, path] })
+  for await (const piece of child) {
+    if (piece.stream !== 'stdout') continue
+    let text = carry + piece.text
+    if (expected !== undefined) {
+      const end = text.indexOf('\n')
+      if (end < 0) {
+        carry = text
+        continue
+      }
+      const line = text.slice(0, end)
+      if (parseRow(line)?.uuid !== expected) return false
+      expected = undefined
+      at += encoder.encode(line).length + 1
+      text = text.slice(end + 1)
+    }
+    carry = takeLines(seen, text, at)
+    at = seen.offset
+  }
+  const { code } = await child.result
+  if (code !== 0) throw new Error(`tail exited with ${code}`)
+  return carry
+}
+
+// Stream a transcript too large for $.fs.read, from its start when it was
+// replaced; its index, or undefined when it could not be read, which is said
+// once for the file.
+async function readLarge($: EngineInterface, path: string, seen: Seen, size: number, mtimeMs: number) {
+  try {
+    let rest = await streamRows($, path, seen)
+    if (rest === false) {
+      Object.assign(seen, { rows: [], offset: 0, lastStart: 0, lastUuid: undefined })
+      rest = await streamRows($, path, seen)
+      if (rest === false) return undefined
+    }
+    Object.assign(seen, { path, size, mtimeMs })
+    return indexSeen(seen, rest)
+  } catch (err) {
+    if (seen.warned !== path) {
+      seen.warned = path
+      const megabytes = Math.round(size / 1024 / 1024)
+      $.ui.toast(`prompt-rail: the transcript is ${megabytes} MB, too large to read here (${(err as Error).message}); prompts are listed as they are drawn`)
+    }
+    return undefined
+  }
+}
 
 // The transcript's index, or undefined when it is as `seen` last read it (a
-// long session's file is not parsed again for a turn that wrote nothing) or
-// before the file exists (a fresh session). Records what it read in `seen`.
-async function readTranscript($: EngineInterface, transcriptPath: string, seen: Seen) {
+// long session's file is not parsed again for a turn that wrote nothing),
+// before the file exists (a fresh session), or while another read is under
+// way. Records what it read in `seen`. A file over READ_CAP is read on from
+// where the last read ended; when that is more than READ_CAP, as on resuming a
+// long session, it is read without holding the hook, and `whenLate` gets the
+// index once it is done.
+async function readTranscript($: EngineInterface, path: string, seen: Seen, whenLate: (index: TranscriptIndex) => void) {
+  if (seen.isReading) return undefined
   try {
-    const { size, mtimeMs } = await $.fs.stat(transcriptPath)
-    if (seen.path === transcriptPath && seen.size === size && seen.mtimeMs === mtimeMs) return undefined
-    const index = indexTranscript(await $.fs.read(transcriptPath))
-    Object.assign(seen, { path: transcriptPath, size, mtimeMs })
-    return index
+    const { size, mtimeMs } = await $.fs.stat(path)
+    if (seen.path === path && seen.size === size && seen.mtimeMs === mtimeMs) return undefined
+    if (seen.path !== path || size < seen.offset) Object.assign(seen, { ...unseen(), warned: seen.warned })
+    if (size <= READ_CAP) {
+      const text = await $.fs.read(path)
+      Object.assign(seen, { rows: [], lastStart: 0, lastUuid: undefined })
+      const rest = takeLines(seen, text, 0)
+      Object.assign(seen, { path, size, mtimeMs })
+      return indexSeen(seen, rest)
+    }
+    seen.isReading = true
+    const reading = readLarge($, path, seen, size, mtimeMs).finally(() => {
+      seen.isReading = false
+    })
+    if (size - seen.offset <= READ_CAP) return await reading
+    void reading.then(index => index && whenLate(index))
+    return undefined
   } catch {
+    seen.isReading = false
     return undefined
   }
 }
@@ -456,9 +618,11 @@ export const register: Register = (on, options) => {
   let lastCurrent = -1
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
-  const seen: Seen = { path: '', size: -1, mtimeMs: -1 }
+  const seen: Seen = unseen()
   // Row key -> the id a prompt's row was last drawn under (see drawnRow).
   const drawn = new Map<string, string>()
+  // The ids of the prompts the last transcript read listed.
+  let filed = new Set<string>()
 
   const addPrompt = (id: string, text: string) => {
     // A new prompt is drawn under a provisional id before it is stored, then
@@ -648,7 +812,9 @@ export const register: Register = (on, options) => {
     // Also fired after a hot reload, when the list starts empty: rebuild it from
     // the transcript this session's classic SessionStart remembered.
     const transcriptPath = await rememberedTranscript($)
-    const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen)
+    const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen, index => {
+      if (merge(index)) void redrawRail($)
+    })
     if (index && merge(index)) await redrawRail($)
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
@@ -702,7 +868,10 @@ export const register: Register = (on, options) => {
     // from the file.
     const known = new Set([...index.known].map(rowKey))
     for (const [name, id] of aliases) if (known.has(name)) known.add(rowKey(id))
-    entries = [...index.prompts, ...entries.filter(entry => !known.has(rowKey(entry.id)))]
+    // An entry the last read listed and this one does not is gone from the
+    // file (replaced under the rail), not a row drawn before it was stored.
+    entries = [...index.prompts, ...entries.filter(entry => !known.has(rowKey(entry.id)) && !filed.has(entry.id))]
+    filed = new Set(index.prompts.map(entry => entry.id))
     const ids = new Set(entries.map(entry => entry.id))
     for (const id of pending) if (!ids.has(id) || known.has(rowKey(id))) pending.delete(id)
     for (const [name, id] of aliases) if (!ids.has(id)) aliases.delete(name)
@@ -723,6 +892,7 @@ export const register: Register = (on, options) => {
       lastCurrent = -1
       unreachable.clear()
       drawn.clear()
+      filed = new Set()
       pending.clear()
       aliases.clear()
       waiting.clear()
@@ -732,10 +902,12 @@ export const register: Register = (on, options) => {
       starter = undefined
       notifiedAt.clear()
       delivered.clear()
-      Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
+      Object.assign(seen, unseen())
       await redrawRail($)
     } else {
-      const index = await readTranscript($, e.transcript_path, seen)
+      const index = await readTranscript($, e.transcript_path, seen, index => {
+      if (merge(index)) void redrawRail($)
+    })
       if (index && merge(index)) await redrawRail($)
     }
     listedAtRest = entries.length
@@ -744,7 +916,9 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.Stop', async ($, e, next) => {
-    const index = await readTranscript($, e.transcript_path, seen)
+    const index = await readTranscript($, e.transcript_path, seen, index => {
+      if (merge(index)) void redrawRail($)
+    })
     if (index && merge(index)) await redrawRail($)
     return next(e)
   })
@@ -759,7 +933,11 @@ export const register: Register = (on, options) => {
     lately = []
     // Every row of the turns before is stored by now: read them, so a row the
     // index does not know can only be this turn's (see currentIndex).
-    const index = seen.path ? await readTranscript($, seen.path, seen) : undefined
+    const index = seen.path
+      ? await readTranscript($, seen.path, seen, index => {
+          if (merge(index)) void redrawRail($)
+        })
+      : undefined
     if (index) merge(index)
     await redrawRail($)
     return next(e)

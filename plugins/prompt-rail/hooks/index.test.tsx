@@ -241,6 +241,10 @@ type Beneath = {
   // plugin pinned as its status (undefined for a clear).
   placed: boolean
   status: (string | undefined)[]
+  // Each `tail` the plugin spawned, as its argv, and whether spawning fails
+  // (the desktop app and SDK hosts run no processes).
+  spawns: string[][]
+  spawnFails: boolean
 }
 const beneath = (transcript = TRANSCRIPT): Beneath => ({
   transcript,
@@ -254,7 +258,13 @@ const beneath = (transcript = TRANSCRIPT): Beneath => ({
   toasts: [],
   placed: true,
   status: [],
+  spawns: [],
+  spawnFails: false,
 })
+
+const bytes = (text: string) => new TextEncoder().encode(text)
+// The engine's cap on one $.fs.read.
+const READ_CAP = 4 * 1024 * 1024
 
 // The world beneath the plugin for a session whose transcript is TRANSCRIPT,
 // with a store in memory the test can read.
@@ -272,11 +282,22 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
   })
   on('fs.read', ($: any, e: any) => {
     disk.reads++
+    if (bytes(disk.transcript).length > READ_CAP) return { deny: 'over 4 MiB' }
     return { value: e.path === '/t/s1.jsonl' ? disk.transcript : '' }
   })
   on('fs.stat', ($: any, e: any) => ({
-    value: { kind: 'file', size: e.path === '/t/s1.jsonl' ? disk.transcript.length : 0, mtimeMs: disk.mtimeMs, isLink: false },
+    value: { kind: 'file', size: e.path === '/t/s1.jsonl' ? bytes(disk.transcript).length : 0, mtimeMs: disk.mtimeMs, isLink: false },
   }))
+  // `tail -c +N path`: the file's bytes from the Nth on, in pieces of a
+  // megabyte or so, as a child's output arrives.
+  on('process.spawn', async function* ($: any, e: any) {
+    disk.spawns.push([...e.argv])
+    if (disk.spawnFails) throw new Error('no processes here')
+    const from = Number(String(e.argv[2]).slice(1)) - 1
+    const text = new TextDecoder().decode(bytes(disk.transcript).slice(from))
+    for (let i = 0; i < text.length; i += 1 << 20) yield { stream: 'stdout', text: text.slice(i, i + (1 << 20)) }
+    return { value: { code: 0, signal: null } }
+  })
   on('ui.invalidate', () => {
     disk.invalidations++
     return { value: undefined }
@@ -322,8 +343,114 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
 
 const railLabels = async ($: any) => {
   const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 40) })
-  return (await rail.findAll({ type: 'Button' })).map((b: any) => String(b.props.label).slice(3))
+  const labels = (await rail.findAll({ type: 'Button' })).map((b: any) => String(b.props.label).slice(3))
+  await rail.unmount()
+  return labels
 }
+
+// A transcript over the engine's read cap: a prompt, a tool call whose
+// result is 4.5 MB, then more prompts. Every row ends with a newline, as the
+// engine writes them.
+const BULK = 'x'.repeat(4.5 * 1024 * 1024)
+const bigRows = (more: Record<string, unknown>[] = []) => [
+  { type: 'user', uuid: 'p1', timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content: 'first' } },
+  { type: 'assistant', uuid: 'b1', timestamp: '2026-09-24T00:00:05.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/w/big.log' } }] } },
+  { type: 'user', uuid: 'r1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: BULK }] } },
+  { type: 'assistant', uuid: 'b2', timestamp: '2026-09-24T00:00:20.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'read it' }] } },
+  { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 20000 },
+  { type: 'user', uuid: 'p2', timestamp: '2026-09-24T00:01:00.000Z', message: { role: 'user', content: '二番目のプロンプト' } },
+  ...more,
+]
+const bigFile = (rows: Record<string, unknown>[]) => `${jsonl(rows)}\n`
+const bigWorld = (on: any, rows = bigRows()) => {
+  const disk = beneath(bigFile(rows))
+  world(on, {}, disk.transcript, disk)
+  return { disk, clock: mock.clock(on) }
+}
+const stop = ($: any) => $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
+
+test('a transcript over 4 MiB is listed in its order, with turn details, without $.fs.read', async ($, on) => {
+  const { disk, clock } = bigWorld(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト'])
+  expect(disk.reads).toBe(0)
+  expect(disk.spawns).toEqual([['tail', '-c', '+1', '/t/s1.jsonl']])
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await drawRow($, 'p1', 'first', { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first · 20s · 1 tool\s*$/ })).toBeDefined()
+})
+
+test('a later read of a large transcript asks only for the bytes after the last row', async ($, on) => {
+  const { disk, clock } = bigWorld(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await clock.settle()
+  const before = bytes(disk.transcript).length
+  const lastRow = bytes(`${JSON.stringify({ parentUuid: 'd1', ...bigRows()[5] })}\n`).length
+  disk.transcript = bigFile(bigRows([{ type: 'user', uuid: 'p3', message: { role: 'user', content: 'third' } }]))
+  disk.mtimeMs = 2
+  await stop($)
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト', 'third'])
+  // It starts at the last row read, to check the file still holds it there.
+  expect(disk.spawns[1]).toEqual(['tail', '-c', `+${before - lastRow + 1}`, '/t/s1.jsonl'])
+})
+
+test('a row torn at the end of a large transcript is listed once it is whole', async ($, on) => {
+  const { disk, clock } = bigWorld(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await clock.settle()
+  const whole = bigFile(bigRows([{ type: 'user', uuid: 'p3', message: { role: 'user', content: 'third' } }]))
+  disk.transcript = whole.slice(0, whole.length - 20)
+  disk.mtimeMs = 2
+  await stop($)
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト'])
+  disk.transcript = whole
+  disk.mtimeMs = 3
+  await stop($)
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト', 'third'])
+})
+
+test('a large transcript rewritten under the rail is read again from its start', async ($, on) => {
+  const { disk, clock } = bigWorld(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await clock.settle()
+  // Same size or larger, but no longer the rows read: a replaced file.
+  disk.transcript = bigFile(bigRows().map(row => (row.uuid === 'p2' ? { ...row, uuid: 'q2', message: { role: 'user', content: 'replaced prompt' } } : row)))
+  disk.mtimeMs = 2
+  await stop($)
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['first', 'replaced prompt'])
+})
+
+test('a rewind appended to a large transcript drops the abandoned prompt', async ($, on) => {
+  const { disk, clock } = bigWorld(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await clock.settle()
+  disk.transcript = bigFile(bigRows([{ type: 'user', uuid: 'p3', parentUuid: 'd1', message: { role: 'user', content: 'instead' } }]))
+  disk.mtimeMs = 2
+  await stop($)
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['first', 'instead'])
+})
+
+test('where no process can run, a large transcript leaves the drawn list and says so once', async ($, on) => {
+  const { disk, clock } = bigWorld(on)
+  disk.spawnFails = true
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await clock.settle()
+  await drawRow($, 'p2', '二番目のプロンプト')
+  disk.mtimeMs = 2
+  await stop($)
+  disk.mtimeMs = 3
+  await stop($)
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['二番目のプロンプト'])
+  expect(disk.toasts.filter(text => text.includes('too large'))).toHaveLength(1)
+})
 
 test('the session start remembers its transcript under its own key', async ($, on) => {
   const store = world(on, { 'transcript:s0': { path: '/t/s0.jsonl', at: 1 } })
