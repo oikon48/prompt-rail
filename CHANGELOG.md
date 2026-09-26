@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+
+- Removed the digit hotkeys from the vertical pane: a click focuses the pane, so the first nine rows grew a `1:` prefix and shifted under the pointer, and the digits reached only the oldest nine prompts; a click and `/prompt-rail next` and `prev` jump to a prompt
+
 ## 0.5.3
 
 - Fixed a prompt showing up as two or three bars when it did not go straight into a turn: one queued while a turn ran, one delivered into the running turn, or one sent from Remote Control; it now shows one bar from the moment it is sent, which takes its stored row once that is drawn
