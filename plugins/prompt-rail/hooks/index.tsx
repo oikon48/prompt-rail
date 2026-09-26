@@ -36,6 +36,8 @@ const WRAPPER = /^<(command-|local-command-|bash-|system-reminder|task-notificat
 const VIEW_CONTEXT = /^\s*<artifact-view-context artifact="[^"]*">\n\{"context":[\s\S]*?\n<\/artifact-view-context>/
 // The notice the engine stores as a user row when the person interrupts a turn.
 const INTERRUPTED = /^\[Request interrupted by user/
+// A message uuid, as the transcript stores it (see rowKey).
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // onScreen reports that arrive within this many ms of each other are one pass
 // of the surface (a scroll, or a redraw), read together.
 const PASS_MS = 150
@@ -58,6 +60,16 @@ type Mode = 'off' | 'vertical' | 'horizontal'
 const isMode = (value: unknown): value is Mode => value === 'off' || value === 'vertical' || value === 'horizontal'
 
 type Entry = { id: string; text: string }
+
+// The key rows are matched by. A message the engine splits into several rows
+// is drawn under ids derived from its stored uuid, the first four groups kept
+// and the last replaced by the row's index, so a uuid is matched by those
+// groups; any other id (a tool_use id, the provisional one) as it is.
+export const rowKey = (id: string) => (UUID.test(id) ? id.slice(0, 24) : id)
+
+// The id a prompt's row was last drawn under, which a jump scrolls to, from a
+// map of row key -> drawn id; its own id while it has not been drawn.
+export const drawnRow = (drawn: Map<string, string>, id: string) => drawn.get(rowKey(id)) ?? id
 
 // Terminal cells a character takes: two for East Asian wide and emoji ranges.
 const cells = (char: string) => {
@@ -341,12 +353,12 @@ async function writeMode($: EngineInterface, mode: Mode) {
   }
 }
 
-// Scroll the transcript to a prompt's row, from a dispatch that answers the
-// person's own input (a press, a typed command): a transcript row moves only
-// then. Records whether the row could be reached.
-async function jumpTo($: EngineInterface, id: string, unreachable: Set<string>) {
+// Scroll the transcript to a prompt's row, drawn under `target`, from a
+// dispatch that answers the person's own input (a press, a typed command): a
+// transcript row moves only then. Records whether the prompt could be reached.
+async function jumpTo($: EngineInterface, id: string, target: string, unreachable: Set<string>) {
   try {
-    const result = await $.ui.scroll({ to: { requestId: id }, block: 'start' })
+    const result = await $.ui.scroll({ to: { requestId: target }, block: 'start' })
     if (result.deny) $.ui.toast(`prompt-rail: ${result.deny}`)
     if (noteScroll(unreachable, id, result.deny)) await redrawRail($)
   } catch (err) {
@@ -373,14 +385,14 @@ async function rememberedTranscript($: EngineInterface) {
 
 export const register: Register = (on, options) => {
   let entries: Entry[] = []
-  // Assistant row uuid -> the prompt it answers, from the transcript.
+  // Assistant row key -> the key of the prompt it answers, from the transcript.
   let owners = new Map<string, string>()
   // Prompt id -> the turn it started, from the transcript.
   let turns = new Map<string, Turn>()
-  // Prompt id -> how long its turns took as the engine reported them on
+  // Prompt row key -> how long its turns took as the engine reported them on
   // ending, for a turn whose turn_duration row the transcript lacks yet.
   const reported = new Map<string, number>()
-  // Prompt id -> how its turn ended as the engine reported it, and whether the
+  // Prompt row key -> how its turn ended as the engine reported it, and whether the
   // newest prompt's turn is running now.
   const ended = new Map<string, Outcome>()
   let isRunning = false
@@ -401,8 +413,8 @@ export const register: Register = (on, options) => {
   // by what the engine reported before the transcript had it.
   const turnOf = (id: string): Turn | undefined => {
     const turn = turns.get(id)
-    const ms = turn?.durationMs ?? reported.get(id)
-    const outcome = isRunningFor(id) ? 'running' : (turn?.outcome ?? ended.get(id))
+    const ms = turn?.durationMs ?? reported.get(rowKey(id))
+    const outcome = isRunningFor(id) ? 'running' : (turn?.outcome ?? ended.get(rowKey(id)))
     if (!turn && ms === undefined && outcome === undefined) return undefined
     return { tools: 0, files: [], ...turn, ...(ms === undefined ? {} : { durationMs: ms }), ...(outcome ? { outcome } : {}) }
   }
@@ -414,12 +426,14 @@ export const register: Register = (on, options) => {
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
   const seen: Seen = { path: '', size: -1, mtimeMs: -1 }
+  // Row key -> the id a prompt's row was last drawn under (see drawnRow).
+  const drawn = new Map<string, string>()
 
   const addPrompt = (id: string, text: string) => {
     // A new prompt is drawn under a provisional id before it is stored, then
     // again under its uuid: list the stored row only, so a repeated prompt
     // ("continue" twice) still gets an entry of its own.
-    if (id === PROVISIONAL_ID || entries.some(entry => entry.id === id)) return false
+    if (id === PROVISIONAL_ID || entries.some(entry => rowKey(entry.id) === rowKey(id))) return false
     entries = [...entries, { id, text }]
     return true
   }
@@ -429,7 +443,7 @@ export const register: Register = (on, options) => {
     const now = Date.now()
     if (now - pass.at > PASS_MS) pass = { at: now, rows: new Map() }
     pass.at = now
-    pass.rows.set(id, isShown)
+    pass.rows.set(rowKey(id), isShown)
   }
 
   // Where the person is reading: the prompt that the topmost row of the latest
@@ -437,7 +451,7 @@ export const register: Register = (on, options) => {
   // rows at the viewport's edges, a redraw every row, so the topmost shown row
   // of either is the viewport's top. Kept while no known row shows.
   const currentIndex = () => {
-    const promptIndex = new Map(entries.map((entry, i) => [entry.id, i]))
+    const promptIndex = new Map(entries.map((entry, i) => [rowKey(entry.id), i]))
     let best = -1
     for (const [id, isShown] of pass.rows) {
       if (!isShown || id === PROVISIONAL_ID) continue
@@ -518,7 +532,7 @@ export const register: Register = (on, options) => {
       }
       const target = stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)
       const entry = entries[target]
-      if (entry) await jumpTo($, entry.id, unreachable)
+      if (entry) await jumpTo($, entry.id, drawnRow(drawn, entry.id), unreachable)
       else $.ui.toast(`prompt-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
       return {}
     }
@@ -548,8 +562,9 @@ export const register: Register = (on, options) => {
     // A turn's details count as the list's: a turn that ends changes its card.
     const listed = (list: Entry[]) => list.map(entry => `${entry.id}\u0000${entry.text}\u0000${turnLine(turnOf(entry.id))}`).join('\u0001')
     const before = { list: listed(entries), current: currentIndex() }
-    entries = [...index.prompts, ...entries.filter(entry => !index.known.has(entry.id))]
-    owners = new Map(index.owners.map(([id, i]) => [id, index.prompts[i]?.id ?? '']))
+    const known = new Set([...index.known].map(rowKey))
+    entries = [...index.prompts, ...entries.filter(entry => !known.has(rowKey(entry.id)))]
+    owners = new Map(index.owners.map(([id, i]) => [rowKey(id), rowKey(index.prompts[i]?.id ?? '')]))
     turns = new Map(index.prompts.map((entry, i) => [entry.id, index.turns[i] ?? { tools: 0, files: [] }]))
     return listed(entries) !== before.list || currentIndex() !== before.current
   }
@@ -565,6 +580,7 @@ export const register: Register = (on, options) => {
       pass = { at: 0, rows: new Map() }
       lastCurrent = -1
       unreachable.clear()
+      drawn.clear()
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       await redrawRail($)
     } else {
@@ -605,9 +621,12 @@ export const register: Register = (on, options) => {
       isRunning = false
       listedAtRest = entries.length
       if (entry) {
-        reported.set(entry.id, (reported.get(entry.id) ?? 0) + e.durationMs)
-        if (e.reason === 'aborted') ended.set(entry.id, 'interrupted')
-        if (e.reason === 'error') ended.set(entry.id, 'error')
+        // By row key: a prompt drawn under a derived id is listed under its
+        // stored uuid once the transcript is read.
+        const key = rowKey(entry.id)
+        reported.set(key, (reported.get(key) ?? 0) + e.durationMs)
+        if (e.reason === 'aborted') ended.set(key, 'interrupted')
+        if (e.reason === 'error') ended.set(key, 'error')
       }
       await redrawRail($)
     }
@@ -619,6 +638,7 @@ export const register: Register = (on, options) => {
     // A slash command's row is drawn as a user row too; it is not a prompt.
     const text = e.props.text.replace(VIEW_CONTEXT, '').trim()
     if (PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
+      drawn.set(rowKey(e.requestId), e.requestId)
       const isAdded = addPrompt(e.requestId, text)
       const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
       if (isAdded || isMoved) redrawRailLater($)
@@ -827,7 +847,7 @@ export const register: Register = (on, options) => {
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
     const entry = entries[index]
-    if (entry) await jumpTo($, entry.id, unreachable)
+    if (entry) await jumpTo($, entry.id, drawnRow(drawn, entry.id), unreachable)
     return next(e)
   })
 }
