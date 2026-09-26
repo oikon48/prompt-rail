@@ -58,7 +58,7 @@ Mouse works best with `"tui": "fullscreen"`.
 | `/prompt-rail prev` | Jump to the previous prompt |
 | `/prompt-rail` | Reopen the rail in the current layout |
 
-The layout is also the "Rail mode" row in `/config`, and it is kept across sessions. In the vertical pane, ctrl+x tab and a digit `1` to `9` jump to that prompt.
+The layout is also the "Rail mode" row in `/config`, and it is kept across sessions.
 
 ## Tick legend
 
@@ -77,7 +77,7 @@ The layout is also the "Rail mode" row in `/config`, and it is kept across sessi
 flowchart LR
   T[transcript .jsonl] -->|every prompt on the live branch| R[rail]
   S[rows on screen] -->|topmost row's prompt| R
-  R -->|click, digit, next/prev| J[scroll that prompt's row into view]
+  R -->|click, next/prev| J[scroll that prompt's row into view]
 ```
 
 The rail lists the prompts of the live branch, so prompts abandoned with `/rewind` drop out, and prompts from before a resume are listed too. The prompt you are reading owns the topmost row on screen. The transcript is read again only when its size or time changed.
@@ -94,7 +94,7 @@ The rail lists the prompts of the live branch, so prompts abandoned with `/rewin
 - The Claude desktop app shows no rail. Checked with its bundled Claude Code 2.1.280, the engine reports the pane as placed, but the app never asks the plugin to draw it.
 - The dock width is shared by all plugin panes; drag its edge to narrow it, down to 24 columns.
 - A `/compact` command's own row cannot be jumped to; its tick turns dotted after the first try.
-- Near the end of the transcript, `next` cannot scroll further, and the digits cover the first nine prompts.
+- Near the end of the transcript, `next` cannot scroll further.
 
 </details>
 

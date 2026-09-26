@@ -1051,10 +1051,6 @@ export const register: Register = (on, options) => {
       return <Text dimColor>{isRail ? '·' : 'No prompts yet'}</Text>
     }
     const current = currentIndex()
-    // While the pane holds the keyboard, 1 to 9 jump to the first nine prompts.
-    // The surface draws such a row as `1: label`, three cells the label gives up.
-    const isKeyed = (i: number) => e.props.isFocused && i < 9
-    const hotkey = (i: number) => (isKeyed(i) ? { hotkey: String(i + 1) } : {})
     // Docked on the terminal: one row per prompt, its tick and its text, the
     // whole row pressable. Too narrow for text, ticks alone (the band shows it).
     if (isRail) {
@@ -1066,16 +1062,11 @@ export const register: Register = (on, options) => {
             <Button
               key={`jump-${i}`}
               plain
-              {...hotkey(i)}
               dimColor={i !== current}
               label={
-                isKeyed(i)
-                  ? hasRoom
-                    ? `${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width - 2)}`
-                    : tick(i === current, isUnreachable(i))
-                  : hasRoom
-                    ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`
-                    : ` ${tick(i === current, isUnreachable(i))} `
+                hasRoom
+                  ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`
+                  : ` ${tick(i === current, isUnreachable(i))} `
               }
               hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
               onPress={() => {}}
@@ -1092,9 +1083,8 @@ export const register: Register = (on, options) => {
           <Button
             key={`jump-${i}`}
             plain
-            {...hotkey(i)}
             dimColor={i !== current}
-            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, isKeyed(i) ? width - 3 : width)}`}
+            label={`${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`}
             onPress={() => {}}
           />
         ))}
@@ -1187,14 +1177,15 @@ export const register: Register = (on, options) => {
   })
 
   // In the pane, a ringed row and the row under the pointer light at once and
-  // read as two highlights. Keep the ring off the rows; the digits still jump
-  // while the pane holds the keyboard, and the engine's own stops (the close
-  // mark, the tabs) carry no plugin, so the matcher leaves them be.
+  // read as two highlights. Keep the ring off the rows; a click still presses,
+  // and /prompt-rail next and prev are its keyboard route. The engine's own
+  // stops (the close mark, the tabs) carry no plugin, so the matcher leaves
+  // them be.
   on('ui.focus', { component: 'Pane', requestId: PANE, plugin: 'prompt-rail' }, async () => ({
-    deny: 'prompt-rail: the rail takes clicks and digits, not the focus ring',
+    deny: 'prompt-rail: the rail takes clicks, not the focus ring',
   }))
 
-  // Scroll from the press dispatch itself (a click or a hotkey).
+  // Scroll from the press dispatch itself (a click).
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
     const entry = entries[index]

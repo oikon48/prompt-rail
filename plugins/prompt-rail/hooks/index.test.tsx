@@ -161,7 +161,7 @@ test('the vertical pane keeps the focus ring off its rows, the engine\'s own sto
   await drawPrompts($, on)
   await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   // A ringed row beside the row under the pointer lights two rows at once;
-  // the digits still jump while the pane holds the keyboard.
+  // a click still presses, and next and prev are the keyboard route.
   const ringed = await $.ui.focus({ component: 'Pane', requestId: 'prompt-rail', plugin: 'prompt-rail', element: 'jump-0', origin: { kind: 'person' } })
   expect(ringed.deny).toBeDefined()
   expect(moves).toEqual([])
@@ -1121,41 +1121,25 @@ test('/prompt-rail runs mid-turn and takes next and prev', async ($, on) => {
   expect(disk.settings.size).toBe(0)
 })
 
-test('a focused vertical pane gives its first nine rows the digits as hotkeys', async ($, on) => {
+test('a focused pane draws the same rows as an unfocused one, with no hotkeys', async ($, on) => {
   world(on)
   for (let i = 0; i < 10; i++) {
-    const row = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: `p${i}`, props: prompt(`prompt ${i}`, null) })
+    const row = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: `p${i}`, props: prompt(`a long prompt number ${i} that would not fit`, null) })
     await row.unmount()
   }
-  const hotkeys = async (surface: 'terminal' | 'desktop', placement: 'dock' | 'inline', isFocused: boolean) => {
-    const site = await $.ui.mount({ plugin: 'prompt-rail', surface, component: 'Pane', requestId: 'prompt-rail', props: { ...pane(placement, 40), isFocused } })
-    const keys = (await site.findAll({ type: 'Button' })).map((b: any) => b.props.hotkey)
+  // A click focuses the pane as ctrl+x tab does, so a row that changed with the
+  // focus would shift under the pointer that just pressed it.
+  const rows = async (surface: 'terminal' | 'desktop', placement: 'dock' | 'inline', bodyColumns: number, isFocused: boolean) => {
+    const site = await $.ui.mount({ plugin: 'prompt-rail', surface, component: 'Pane', requestId: 'prompt-rail', props: { ...pane(placement, bodyColumns), isFocused } })
+    const drawn = (await site.findAll({ type: 'Button' })).map((b: any) => ({ label: b.props.label, hotkey: b.props.hotkey }))
     await site.unmount()
-    return keys
-  }
-  const digits = ['1', '2', '3', '4', '5', '6', '7', '8', '9', undefined]
-  expect(await hotkeys('terminal', 'dock', true)).toEqual(digits)
-  expect(await hotkeys('desktop', 'inline', true)).toEqual(digits)
-  // Unfocused, a digit would never reach it, and `1:` would only crowd the row.
-  expect(await hotkeys('terminal', 'dock', false)).toEqual(Array(10).fill(undefined))
-})
-
-test('a focused pane makes room for the hotkey so each row stays one line', async ($, on) => {
-  await drawPrompts($, on)
-  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('a long prompt that would not fit beside its tick and hotkey', null) })
-  const labels = async (bodyColumns: number) => {
-    const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: { ...pane('dock', bodyColumns), isFocused: true } })
-    // The surface draws a plain Button with a hotkey as `1: label`.
-    const drawn = (await rail.findAll({ type: 'Button' })).map((b: any) => `${b.props.hotkey}: ${b.props.label}`)
-    await rail.unmount()
     return drawn
   }
-  const wide = await labels(30)
-  expect(wide[2]).toBe('3: ─ a long prompt that woul…')
-  // A row still leaves the frame a cell.
-  expect(Math.max(...wide.map(label => label.length))).toBeLessThanOrEqual(29)
-  // Too narrow for text: the hotkey and the tick fill the rail.
-  expect(await labels(4)).toEqual(['1: ─', '2: ━', '3: ─'])
+  for (const [surface, placement, bodyColumns] of [['terminal', 'dock', 30], ['terminal', 'dock', 4], ['desktop', 'inline', 40]] as const) {
+    const focused = await rows(surface, placement, bodyColumns, true)
+    expect(focused.map(row => row.hotkey)).toEqual(Array(10).fill(undefined))
+    expect(focused).toEqual(await rows(surface, placement, bodyColumns, false))
+  }
 })
 
 // Two turns: the first edits files and records its duration, the second only
