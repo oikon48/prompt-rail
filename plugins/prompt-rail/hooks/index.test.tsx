@@ -449,75 +449,186 @@ test('a jump to a stored prompt scrolls to the id its row was drawn under', () =
   expect(drawnRow(drawn, 'u1')).toBe('u1')
 })
 
-// A prompt sent while a turn runs is queued: the engine draws it under two ids
-// it never stores, then, once dequeued, under the provisional id and its
-// stored uuid (seen in 2.1.283).
-const drawRow = async ($: any, requestId: string, text: string) => {
-  const row = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId, props: prompt(text, null) })
+// How the engine draws a prompt that does not go straight into a turn, as
+// seen in 2.1.283 (tmux and Herdr alike):
+// - queued while a turn runs and sent once it ends: two rows it never
+//   stores, around prompt.submit, then the provisional row and the stored one;
+// - delivered into the running turn: the same two rows, then the row of the
+//   queued_command attachment the transcript stores, with no provisional row;
+// - sent from Remote Control, even at rest: session.receive, one row it never
+//   stores, the provisional row, prompt.submit, then the stored row.
+const drawRow = async ($: any, requestId: string, text: string, onScreen: { first: number; last: number; of: number } | null = null) => {
+  const row = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId, props: prompt(text, onScreen) })
   await row.unmount()
 }
+const submit = ($: any, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
 const sendQueued = async ($: any, text: string, ids: [string, string, string]) => {
   await drawRow($, ids[0], text)
+  await submit($, text)
   await drawRow($, ids[1], text)
   await drawRow($, 'placeholder', text)
   await drawRow($, ids[2], text)
 }
+// The world plus the engine's own answers to the events these tests raise.
+const queueWorld = (on: any, transcript = jsonl([])) => {
+  const disk = beneath(transcript)
+  world(on, {}, transcript, disk)
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  on('prompt.submit', ($: any, e: any) => ({ text: e.text }))
+  on('session.receive', ($: any, e: any) => ({ text: e.text }))
+  return disk
+}
+const sendFirst = async ($: any, text: string, id: string) => {
+  await submit($, text)
+  await drawRow($, 'placeholder', text)
+  await $.turn.start({ text, turnId: `t-${id}` })
+  await drawRow($, id, text)
+}
 
 test('a prompt queued while a turn runs is listed once', async ($, on) => {
-  world(on, {}, jsonl([]))
-  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
-  await drawRow($, 'placeholder', 'first')
-  await drawRow($, 's1', 'first')
-  await $.turn.start({ text: 'first', turnId: 't1' })
+  queueWorld(on)
+  await sendFirst($, 'first', 's1')
   await sendQueued($, 'queued', ['q1', 'q2', 's2'])
   expect(await railLabels($)).toEqual(['first', 'queued'])
 })
 
+test('a queued prompt is listed once as soon as it is sent', async ($, on) => {
+  queueWorld(on)
+  await sendFirst($, 'first', 's1')
+  await drawRow($, 'q1', 'queued')
+  await submit($, 'queued')
+  await drawRow($, 'q2', 'queued')
+  expect(await railLabels($)).toEqual(['first', 'queued'])
+})
+
+test('queue rows drawn just before the notification make one entry', async ($, on) => {
+  queueWorld(on)
+  await sendFirst($, 'first', 's1')
+  await drawRow($, 'q1', 'queued')
+  await drawRow($, 'q2', 'queued')
+  await submit($, 'queued')
+  expect(await railLabels($)).toEqual(['first', 'queued'])
+})
+
 test('a prompt queued behind the same text keeps both entries', async ($, on) => {
-  world(on, {}, jsonl([]))
-  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
-  await drawRow($, 'placeholder', 'continue')
-  await drawRow($, 's1', 'continue')
-  await $.turn.start({ text: 'continue', turnId: 't1' })
+  queueWorld(on)
+  await sendFirst($, 'continue', 's1')
   await sendQueued($, 'continue', ['q1', 'q2', 's2'])
   expect(await railLabels($)).toEqual(['continue', 'continue'])
 })
 
 test('a prompt drawn at rest is kept when a queued prompt has the same text', async ($, on) => {
   // As on a resume whose transcript cannot be read: the rows are drawn only.
-  world(on, {}, jsonl([]))
-  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  queueWorld(on)
   await drawRow($, 'old', 'continue')
-  await drawRow($, 'placeholder', 'go on')
-  await drawRow($, 's1', 'go on')
-  await $.turn.start({ text: 'go on', turnId: 't1' })
+  await sendFirst($, 'go on', 's1')
   await sendQueued($, 'continue', ['q1', 'q2', 's2'])
   expect(await railLabels($)).toEqual(['continue', 'go on', 'continue'])
 })
 
+test('a row drawn well before a prompt with its text is sent stays its own entry', async ($, on) => {
+  queueWorld(on)
+  await drawRow($, 'old', 'continue')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await sendFirst($, 'continue', 's1')
+  expect(await railLabels($)).toEqual(['continue', 'continue'])
+})
+
 test('a prompt whose turn starts with no provisional row is not taken for a queued one', async ($, on) => {
   // The session's first prompt: its turn starts, then its stored row is drawn.
-  world(on, {}, jsonl([]))
-  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
-  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  queueWorld(on)
   await $.turn.start({ text: 'first', turnId: 't1' })
   await drawRow($, 's1', 'first')
   await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
-  await drawRow($, 'placeholder', 'first')
-  await drawRow($, 's2', 'first')
+  await sendFirst($, 'first', 's2')
   expect(await railLabels($)).toEqual(['first', 'first'])
 })
 
 test('a sent prompt the transcript listed first still ends its provisional row', async ($, on) => {
   // The turn's start read the file before the stored row was drawn.
-  world(on, {}, jsonl([{ type: 'user', uuid: 's1', message: { role: 'user', content: 'continue' } }]))
-  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  queueWorld(on, jsonl([{ type: 'user', uuid: 's1', message: { role: 'user', content: 'continue' } }]))
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
-  await drawRow($, 'placeholder', 'continue')
-  await $.turn.start({ text: 'continue', turnId: 't1' })
-  await drawRow($, 's1', 'continue')
+  await sendFirst($, 'continue', 's1')
   await sendQueued($, 'continue', ['q1', 'q2', 's2'])
   expect(await railLabels($)).toEqual(['continue', 'continue'])
+})
+
+test('a prompt sent from Remote Control at rest is listed once', async ($, on) => {
+  queueWorld(on)
+  await $.session.receive({ text: 'remote one', origin: { kind: 'bridge' } })
+  await drawRow($, 'r1', 'remote one')
+  await drawRow($, 'placeholder', 'remote one')
+  await $.prompt.submit({ text: 'remote one', wait: false, origin: { kind: 'bridge' } })
+  await $.turn.start({ text: 'remote one', turnId: 't1' })
+  await drawRow($, 's1', 'remote one')
+  expect(await railLabels($)).toEqual(['remote one'])
+})
+
+test('a prompt delivered into the running turn is listed once and read on its own row', async ($, on) => {
+  queueWorld(on)
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await sendFirst($, 'first', 's1')
+  await drawRow($, 'q1', 'mid')
+  await submit($, 'mid')
+  await drawRow($, 'q2', 'mid')
+  // The attachment row is the one left on screen once the turn reads it.
+  await drawRow($, 'a1', 'mid', { first: 0, last: 1, of: 2 })
+  expect(await railLabels($)).toEqual(['first', 'mid'])
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '┃'])
+})
+
+// A prompt delivered into the running turn, stored as a queued_command
+// attachment inside the turn the first prompt started.
+const DELIVERED = [
+  { type: 'user', uuid: 's1', timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content: 'first' } },
+  {
+    type: 'assistant',
+    uuid: 'b1',
+    timestamp: '2026-09-24T00:00:05.000Z',
+    message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'sleep 8' } }] },
+  },
+  { type: 'user', uuid: 'r1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: '' }] } },
+  { type: 'attachment', uuid: 'a1', attachment: { type: 'queued_command', prompt: 'mid' } },
+  { type: 'assistant', uuid: 'b2', timestamp: '2026-09-24T00:00:14.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
+  { type: 'system', uuid: 'd1', subtype: 'turn_duration', durationMs: 14000 },
+]
+
+test('a prompt delivered into a turn is listed from the transcript, the turn staying with its first prompt', async ($, on) => {
+  queueWorld(on, jsonl(DELIVERED))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  expect(await railLabels($)).toEqual(['first', 'mid'])
+  await drawRow($, 's1', 'first', { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first · 14s · 1 tool\s*$/ })).toBeDefined()
+})
+
+test('a delivered prompt drawn before the transcript is read is listed once after it', async ($, on) => {
+  const disk = queueWorld(on, jsonl(DELIVERED.slice(0, 3)))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await drawRow($, 'q1', 'mid')
+  await submit($, 'mid')
+  await drawRow($, 'q2', 'mid')
+  await drawRow($, 'a1', 'mid')
+  disk.transcript = jsonl(DELIVERED)
+  disk.mtimeMs = 2
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
+  expect(await railLabels($)).toEqual(['first', 'mid'])
+})
+
+test('what the engine reported of a turn goes to the prompt that started it, not one delivered into it', async ($, on) => {
+  queueWorld(on)
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await sendFirst($, 'first', 's1')
+  await drawRow($, 'q1', 'mid')
+  await submit($, 'mid')
+  await drawRow($, 'a1', 'mid')
+  await $.turn.complete({ answer: 'done', durationMs: 12500, isAborted: true, turnId: 't-s1', reason: 'aborted' })
+  await drawRow($, 's1', 'first', { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first · 12s · interrupted\s*$/ })).toBeDefined()
 })
 
 test('a tool row at the top of the viewport places the reader under its prompt', async ($, on) => {
