@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3
+
+- Fixed a prompt showing up as two or three bars when it did not go straight into a turn: one queued while a turn ran, one delivered into the running turn, or one sent from Remote Control; it now shows one bar from the moment it is sent, which takes its stored row once that is drawn
+- Fixed prompts in a long session being listed in the order their rows were drawn (close to reverse after a reload), with older prompts missing and no turn details, because a transcript over 4 MiB was never read; it is now read with `tail`, from where the last read ended, without holding the session while it loads
+- Fixed a prompt drawn under an id the engine derives from its stored uuid being listed twice, placing the reader under the newest prompt, and refusing jumps
+- Changed a prompt delivered into a running turn to be listed on its own, with the turn's details staying on the prompt that started it
+
 ## 0.5.2
 
 - Fixed a prompt sent while an artifact is open in the viewer being listed as the `<artifact-view-context>` block the engine puts ahead of it; the rail now shows the typed text, and a tag typed by hand is kept as typed
