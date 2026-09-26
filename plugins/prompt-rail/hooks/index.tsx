@@ -442,9 +442,13 @@ export const register: Register = (on, options) => {
   // ids it never stores until it is dequeued; then it is drawn under the
   // provisional id and its stored uuid, as any sent prompt. The ids of rows
   // added while a turn runs with no provisional row before them, and the text
-  // of the prompt last drawn under the provisional id until its stored row is.
+  // of the prompt last sent (drawn under the provisional id, or whose turn
+  // started with none, as the session's first) until its stored row is drawn.
   const queued = new Set<string>()
   let submitted: string | undefined
+  // Whether a prompt row other than a queued one was listed since the main
+  // loop last came to rest: a turn that starts with none has its row to come.
+  let isSentSinceRest = false
 
   // List a prompt row as it is drawn; true when the list changed. The
   // provisional row of a dequeued prompt drops the rows drawn while it was
@@ -458,8 +462,11 @@ export const register: Register = (on, options) => {
       return entries.length !== count
     }
     const isAdded = addPrompt(id, text)
-    if (isAdded && submitted === text) submitted = undefined
+    // The stored row ends the sent prompt even when a transcript read listed
+    // it first, so a later queued row with its text is still taken for one.
+    if (submitted === text) submitted = undefined
     else if (isAdded && isRunning) queued.add(id)
+    if (isAdded && !queued.has(id)) isSentSinceRest = true
     return isAdded
   }
 
@@ -608,6 +615,7 @@ export const register: Register = (on, options) => {
       drawn.clear()
       queued.clear()
       submitted = undefined
+      isSentSinceRest = false
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       await redrawRail($)
     } else {
@@ -630,6 +638,8 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     isRunning = true
     isContinuation = e.text.trim() === ''
+    const text = e.text.replace(VIEW_CONTEXT, '').trim()
+    if (submitted === undefined && !isSentSinceRest && text) submitted = text
     // Every row of the turns before is stored by now: read them, so a row the
     // index does not know can only be this turn's (see currentIndex).
     const index = seen.path ? await readTranscript($, seen.path, seen) : undefined
@@ -646,6 +656,7 @@ export const register: Register = (on, options) => {
     const entry = entries[entries.length - 1]
     if (e.agentId === undefined) {
       isRunning = false
+      isSentSinceRest = false
       listedAtRest = entries.length
       if (entry) {
         // By row key: a prompt drawn under a derived id is listed under its

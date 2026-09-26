@@ -495,6 +495,31 @@ test('a prompt drawn at rest is kept when a queued prompt has the same text', as
   expect(await railLabels($)).toEqual(['continue', 'go on', 'continue'])
 })
 
+test('a prompt whose turn starts with no provisional row is not taken for a queued one', async ($, on) => {
+  // The session's first prompt: its turn starts, then its stored row is drawn.
+  world(on, {}, jsonl([]))
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  await $.turn.start({ text: 'first', turnId: 't1' })
+  await drawRow($, 's1', 'first')
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await drawRow($, 'placeholder', 'first')
+  await drawRow($, 's2', 'first')
+  expect(await railLabels($)).toEqual(['first', 'first'])
+})
+
+test('a sent prompt the transcript listed first still ends its provisional row', async ($, on) => {
+  // The turn's start read the file before the stored row was drawn.
+  world(on, {}, jsonl([{ type: 'user', uuid: 's1', message: { role: 'user', content: 'continue' } }]))
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await drawRow($, 'placeholder', 'continue')
+  await $.turn.start({ text: 'continue', turnId: 't1' })
+  await drawRow($, 's1', 'continue')
+  await sendQueued($, 'continue', ['q1', 'q2', 's2'])
+  expect(await railLabels($)).toEqual(['continue', 'continue'])
+})
+
 test('a tool row at the top of the viewport places the reader under its prompt', async ($, on) => {
   world(on)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
