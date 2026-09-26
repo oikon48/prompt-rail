@@ -41,6 +41,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // onScreen reports that arrive within this many ms of each other are one pass
 // of the surface (a scroll, or a redraw), read together.
 const PASS_MS = 150
+// A row added at most this many ms before a prompt's notification may be that
+// prompt's own: the engine draws a queued prompt's first row as it notifies.
+const LATELY_MS = 250
 // Cells kept left of the horizontal rail: off the window's edge, a pointer
 // leaving the first bar crosses a cell and the surface sees the hover end.
 const RAIL_INSET = 2
@@ -237,20 +240,24 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
   const turns: Turn[] = []
   // When each turn started and when its latest reply was written.
   const times: { start: number; last: number }[] = []
+  // The prompt that started the turn being read: a prompt delivered into a
+  // turn is listed, but the turn's details stay with the one that started it.
+  let started = -1
   for (const row of rows) {
     if (row.isSidechain || !live.has(row.uuid)) continue
-    const turn = turns[turns.length - 1]
+    const turn = turns[started]
     if (row.type === 'system' && row.subtype === 'turn_duration' && typeof row.durationMs === 'number') {
       if (turn) turn.durationMs = (turn.durationMs ?? 0) + row.durationMs
       continue
     }
     if (row.type === 'assistant') {
       if (prompts.length === 0 || !turn) continue
+      // A reply places the reader under the latest prompt, delivered or not.
       const owner = prompts.length - 1
       owners.push([row.uuid, owner])
       if (row.isApiErrorMessage === true) turn.outcome = 'error'
       const at = Date.parse(row.timestamp)
-      if (Number.isFinite(at)) times[owner]!.last = at
+      if (Number.isFinite(at)) times[started]!.last = at
       const blocks = Array.isArray(row.message?.content) ? row.message.content : []
       for (const block of blocks) {
         if (block?.type !== 'tool_use' || typeof block.id !== 'string') continue
@@ -259,6 +266,17 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
         const path = block.input?.file_path
         if (EDITING_TOOLS.has(block.name) && typeof path === 'string' && !turn.files.includes(path)) turn.files.push(path)
       }
+      continue
+    }
+    // A prompt typed while a turn ran and delivered into it is stored as a
+    // queued_command attachment, never as a user row of its own.
+    if (row.type === 'attachment' && row.attachment?.type === 'queued_command') {
+      const prompt = row.attachment.prompt
+      const text = typeof prompt === 'string' ? prompt.replace(VIEW_CONTEXT, '').trim() : ''
+      if (!text || WRAPPER.test(text) || text.startsWith('/')) continue
+      prompts.push({ id: row.uuid, text })
+      turns.push({ tools: 0, files: [] })
+      times.push({ start: NaN, last: NaN })
       continue
     }
     if (row.type !== 'user' || row.isMeta || row.isCompactSummary || row.message?.role !== 'user') continue
@@ -285,6 +303,7 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
     if (!text || WRAPPER.test(text) || text.startsWith('/')) continue
     prompts.push({ id: row.uuid, text })
     turns.push({ tools: 0, files: [] })
+    started = prompts.length - 1
     const at = Date.parse(row.timestamp)
     times.push({ start: at, last: at })
   }
@@ -404,9 +423,21 @@ export const register: Register = (on, options) => {
   // person may send the same text twice.
   let listedAtRest = 0
   let isContinuation = false
+  // The text of the prompt that started the main loop's latest turn, and the
+  // id of its entry once its row is drawn (see listDrawn).
+  let turnText = ''
+  let starter: string | undefined
+  // The entry of the prompt that started the latest turn, not the newest,
+  // since a prompt delivered into the turn comes after it, with the same text
+  // or not.
+  const turnEntry = () => {
+    const started = entries.find(entry => entry.id === starter)
+    if (started) return started
+    for (let i = entries.length - 1; i >= 0; i--) if (turnText && entries[i]!.text === turnText) return entries[i]
+    return entries[entries.length - 1]
+  }
   const isRunningFor = (id: string) => {
-    const newest = entries[entries.length - 1]
-    if (!isRunning || newest?.id !== id) return false
+    if (!isRunning || turnEntry()?.id !== id) return false
     return isContinuation || entries.length > listedAtRest
   }
   // A prompt's turn as the rail shows it: the transcript's record, completed
@@ -438,6 +469,110 @@ export const register: Register = (on, options) => {
     return true
   }
 
+  // A prompt that does not go straight into a turn (queued behind the running
+  // one, delivered into it, or sent from Remote Control) is drawn under ids the
+  // engine never stores before its stored row comes. Its entry is pending
+  // meanwhile: rows drawn with its text are other names of it (row key ->
+  // entry id), and its stored row takes its place in the list.
+  const pending = new Set<string>()
+  const aliases = new Map<string, string>()
+  // Texts of prompts sent and not stored yet: from prompt.submit or
+  // session.receive until the stored row is drawn or the main loop rests.
+  const waiting = new Set<string>()
+  // The text of the prompt last drawn under the provisional id, until its
+  // stored row is drawn.
+  let provisional: string | undefined
+  // Entries added since the last notification, placeholder or turn edge, and
+  // when: the engine may draw a queued prompt's first row before its
+  // notification, which then takes it for that prompt's.
+  let lately: { id: string; at: number }[] = []
+  // When each waiting text's notification came, and the pending entries
+  // delivered into the running turn: a row of theirs drawn well after the
+  // notification is the attachment the turn read, and no provisional row
+  // follows, so the turn's end leaves them pending no more.
+  const notifiedAt = new Map<string, number>()
+  const delivered = new Set<string>()
+
+  const pendingWith = (text: string) => entries.find(entry => pending.has(entry.id) && entry.text === text)
+  // The entry a drawn row belongs to, by its own key or as another name.
+  const entryKeyOf = (key: string) => {
+    if (entries.some(entry => rowKey(entry.id) === key)) return key
+    const id = aliases.get(key)
+    return id === undefined ? key : rowKey(id)
+  }
+
+  // A prompt with `text` was sent: its rows are pending until the stored one
+  // is drawn. True when the list changed.
+  const noteSent = (text: string) => {
+    waiting.add(text)
+    const now = Date.now()
+    notifiedAt.set(text, now)
+    const fresh = new Set(lately.filter(item => now - item.at <= LATELY_MS).map(item => item.id))
+    lately = []
+    const own = entries.filter(entry => fresh.has(entry.id) && entry.text === text && !pending.has(entry.id))
+    const held = pendingWith(text) ?? own[0]
+    if (!held || own.length === 0) return false
+    pending.add(held.id)
+    const others = new Set(own.filter(entry => entry !== held).map(entry => entry.id))
+    for (const id of others) aliases.set(rowKey(id), held.id)
+    entries = entries.filter(entry => !others.has(entry.id))
+    return others.size > 0
+  }
+
+  // List a prompt row as it is drawn; true when the list changed.
+  const listDrawn = (id: string, text: string) => {
+    if (id === PROVISIONAL_ID) {
+      provisional = text
+      lately = []
+      return false
+    }
+    const key = rowKey(id)
+    if (entries.some(entry => rowKey(entry.id) === key)) {
+      // A stored row a transcript read listed first still ends its prompt.
+      if (provisional === text) {
+        provisional = undefined
+        waiting.delete(text)
+        if (isRunning) starter = entries.find(entry => rowKey(entry.id) === key)?.id
+      }
+      return false
+    }
+    const alias = aliases.get(key)
+    if (alias !== undefined) {
+      drawn.set(rowKey(alias), id)
+      return false
+    }
+    if (provisional === text) {
+      provisional = undefined
+      waiting.delete(text)
+      if (isRunning) starter = id
+      const held = pendingWith(text)
+      if (!held) return addPrompt(id, text)
+      // The stored row takes the place of the entry that waited for it.
+      entries = entries.map(entry => (entry === held ? { id, text } : entry))
+      pending.delete(held.id)
+      for (const [name, target] of aliases) if (target === held.id) aliases.set(name, id)
+      aliases.set(rowKey(held.id), id)
+      return true
+    }
+    if (waiting.has(text)) {
+      const held = pendingWith(text)
+      if (held) {
+        // Another row of the waiting prompt; a jump goes to the one drawn last.
+        aliases.set(key, held.id)
+        drawn.set(rowKey(held.id), id)
+        if (isRunning && Date.now() - (notifiedAt.get(text) ?? Date.now()) > LATELY_MS) delivered.add(held.id)
+        return false
+      }
+      pending.add(id)
+      return addPrompt(id, text)
+    }
+    const isAdded = addPrompt(id, text)
+    if (isAdded) lately = [...lately, { id, at: Date.now() }]
+    // A turn's prompt drawn with no provisional row, as the session's first.
+    if (isAdded && isRunning && starter === undefined && text === turnText) starter = id
+    return isAdded
+  }
+
   // Record one onScreen report into the current pass.
   const see = (id: string, isShown: boolean) => {
     const now = Date.now()
@@ -453,8 +588,9 @@ export const register: Register = (on, options) => {
   const currentIndex = () => {
     const promptIndex = new Map(entries.map((entry, i) => [rowKey(entry.id), i]))
     let best = -1
-    for (const [id, isShown] of pass.rows) {
-      if (!isShown || id === PROVISIONAL_ID) continue
+    for (const [key, isShown] of pass.rows) {
+      if (!isShown || key === PROVISIONAL_ID) continue
+      const id = entryKeyOf(key)
       const ownerId = owners.get(id)
       // A reply or tool row the transcript read does not know was written
       // after it: the Stop hook reads before the turn's last reply is stored,
@@ -562,8 +698,14 @@ export const register: Register = (on, options) => {
     // A turn's details count as the list's: a turn that ends changes its card.
     const listed = (list: Entry[]) => list.map(entry => `${entry.id}\u0000${entry.text}\u0000${turnLine(turnOf(entry.id))}`).join('\u0001')
     const before = { list: listed(entries), current: currentIndex() }
+    // An entry whose row, or another name of it, the file holds is listed
+    // from the file.
     const known = new Set([...index.known].map(rowKey))
+    for (const [name, id] of aliases) if (known.has(name)) known.add(rowKey(id))
     entries = [...index.prompts, ...entries.filter(entry => !known.has(rowKey(entry.id)))]
+    const ids = new Set(entries.map(entry => entry.id))
+    for (const id of pending) if (!ids.has(id) || known.has(rowKey(id))) pending.delete(id)
+    for (const [name, id] of aliases) if (!ids.has(id)) aliases.delete(name)
     owners = new Map(index.owners.map(([id, i]) => [rowKey(id), rowKey(index.prompts[i]?.id ?? '')]))
     turns = new Map(index.prompts.map((entry, i) => [entry.id, index.turns[i] ?? { tools: 0, files: [] }]))
     return listed(entries) !== before.list || currentIndex() !== before.current
@@ -581,6 +723,15 @@ export const register: Register = (on, options) => {
       lastCurrent = -1
       unreachable.clear()
       drawn.clear()
+      pending.clear()
+      aliases.clear()
+      waiting.clear()
+      provisional = undefined
+      lately = []
+      turnText = ''
+      starter = undefined
+      notifiedAt.clear()
+      delivered.clear()
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       await redrawRail($)
     } else {
@@ -603,6 +754,9 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     isRunning = true
     isContinuation = e.text.trim() === ''
+    turnText = e.text.replace(VIEW_CONTEXT, '').trim()
+    starter = undefined
+    lately = []
     // Every row of the turns before is stored by now: read them, so a row the
     // index does not know can only be this turn's (see currentIndex).
     const index = seen.path ? await readTranscript($, seen.path, seen) : undefined
@@ -611,14 +765,22 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // A main-loop turn ended: its prompt is the newest. The transcript's
+  // A main-loop turn ended: its prompt is the one that started it (see
+  // turnEntry). The transcript's
   // turn_duration row is written after the Stop hook reads the file, so keep
   // the engine's figure and how the turn ended until a later read has them.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    const entry = entries[entries.length - 1]
+    const entry = turnEntry()
     if (e.agentId === undefined) {
       isRunning = false
+      // A prompt still waiting now is queued behind this turn; its rows to
+      // come follow its provisional row.
+      waiting.clear()
+      notifiedAt.clear()
+      for (const id of delivered) pending.delete(id)
+      delivered.clear()
+      lately = []
       listedAtRest = entries.length
       if (entry) {
         // By row key: a prompt drawn under a derived id is listed under its
@@ -633,15 +795,26 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  // A prompt was sent: typed, or delivered from Remote Control. Its rows drawn
+  // before the stored one are pending (see listDrawn).
+  on('prompt.submit', async ($, e, next) => {
+    if (PROMPT_KINDS.has(e.origin.kind) && noteSent(e.text.replace(VIEW_CONTEXT, '').trim())) await redrawRail($)
+    return next(e)
+  })
+  on('session.receive', async ($, e, next) => {
+    if (PROMPT_KINDS.has(e.origin.kind) && noteSent(e.text.replace(VIEW_CONTEXT, '').trim())) await redrawRail($)
+    return next(e)
+  })
+
   // Record every prompt row as it is drawn, and which rows the viewport shows.
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
     // A slash command's row is drawn as a user row too; it is not a prompt.
     const text = e.props.text.replace(VIEW_CONTEXT, '').trim()
     if (PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
       drawn.set(rowKey(e.requestId), e.requestId)
-      const isAdded = addPrompt(e.requestId, text)
+      const isListed = listDrawn(e.requestId, text)
       const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
-      if (isAdded || isMoved) redrawRailLater($)
+      if (isListed || isMoved) redrawRailLater($)
     }
     return next(e)
   })
