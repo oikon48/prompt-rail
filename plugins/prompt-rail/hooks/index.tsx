@@ -29,6 +29,9 @@ const PROVISIONAL_ID = 'placeholder'
 // User rows the engine writes around its own output (slash commands, bash
 // mode, reminders), which are not prompts.
 const WRAPPER = /^<(command-|local-command-|bash-|system-reminder|task-notification|user-prompt-submit-hook)/
+// The viewer's state the engine puts ahead of a prompt sent while an artifact
+// is open; the typed text follows it.
+const VIEW_CONTEXT = /^\s*<artifact-view-context\b[^>]*>[\s\S]*?<\/artifact-view-context>/
 // The notice the engine stores as a user row when the person interrupts a turn.
 const INTERRUPTED = /^\[Request interrupted by user/
 // onScreen reports that arrive within this many ms of each other are one pass
@@ -255,7 +258,7 @@ const indexTranscript = (jsonl: string): TranscriptIndex => {
         .map((block: any) => block.text)
         .join('\n')
     }
-    text = text.trim()
+    text = text.replace(VIEW_CONTEXT, '').trim()
     // An interruption notice ends its turn; one mid tool call rides with the
     // call's result, so it is read before tool results are passed over.
     if (INTERRUPTED.test(text)) {
@@ -612,8 +615,9 @@ export const register: Register = (on, options) => {
   // Record every prompt row as it is drawn, and which rows the viewport shows.
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
     // A slash command's row is drawn as a user row too; it is not a prompt.
-    if (PROMPT_KINDS.has(e.props.origin.kind) && !e.props.text.trimStart().startsWith('/')) {
-      const isAdded = addPrompt(e.requestId, e.props.text)
+    const text = e.props.text.replace(VIEW_CONTEXT, '').trim()
+    if (PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
+      const isAdded = addPrompt(e.requestId, text)
       const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
       if (isAdded || isMoved) redrawRailLater($)
     }

@@ -348,6 +348,22 @@ test('prompts are listed in transcript order, wrappers left out, repeats kept', 
   expect(await railLabels($)).toEqual(['first stored prompt', '<div> why does this overflow?', 'continue', 'continue'])
 })
 
+// A prompt sent while an artifact is open in the viewer: the engine stores the
+// viewer's state ahead of the typed text.
+const VIEWED = '<artifact-view-context artifact="bb04">\n{"context":{"mode":"edit","slideId":"s38"}}\n</artifact-view-context>\n\nswap the image'
+
+test('the artifact view context ahead of a stored prompt is left out of its text', async ($, on) => {
+  world(on, {}, jsonl([{ type: 'user', uuid: 'v1', message: { role: 'user', content: VIEWED } }]))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['swap the image'])
+})
+
+test('the artifact view context ahead of a drawn prompt is left out of its text', async ($, on) => {
+  world(on, {}, jsonl([]))
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'v1', props: prompt(VIEWED, null) })
+  expect(await railLabels($)).toEqual(['swap the image'])
+})
+
 test('a repeated prompt gets its own entry; the provisional row is not listed', async ($, on) => {
   world(on)
   const draw = async (requestId: string, text: string) => {
