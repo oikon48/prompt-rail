@@ -449,6 +449,52 @@ test('a jump to a stored prompt scrolls to the id its row was drawn under', () =
   expect(drawnRow(drawn, 'u1')).toBe('u1')
 })
 
+// A prompt sent while a turn runs is queued: the engine draws it under two ids
+// it never stores, then, once dequeued, under the provisional id and its
+// stored uuid (seen in 2.1.283).
+const drawRow = async ($: any, requestId: string, text: string) => {
+  const row = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId, props: prompt(text, null) })
+  await row.unmount()
+}
+const sendQueued = async ($: any, text: string, ids: [string, string, string]) => {
+  await drawRow($, ids[0], text)
+  await drawRow($, ids[1], text)
+  await drawRow($, 'placeholder', text)
+  await drawRow($, ids[2], text)
+}
+
+test('a prompt queued while a turn runs is listed once', async ($, on) => {
+  world(on, {}, jsonl([]))
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  await drawRow($, 'placeholder', 'first')
+  await drawRow($, 's1', 'first')
+  await $.turn.start({ text: 'first', turnId: 't1' })
+  await sendQueued($, 'queued', ['q1', 'q2', 's2'])
+  expect(await railLabels($)).toEqual(['first', 'queued'])
+})
+
+test('a prompt queued behind the same text keeps both entries', async ($, on) => {
+  world(on, {}, jsonl([]))
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  await drawRow($, 'placeholder', 'continue')
+  await drawRow($, 's1', 'continue')
+  await $.turn.start({ text: 'continue', turnId: 't1' })
+  await sendQueued($, 'continue', ['q1', 'q2', 's2'])
+  expect(await railLabels($)).toEqual(['continue', 'continue'])
+})
+
+test('a prompt drawn at rest is kept when a queued prompt has the same text', async ($, on) => {
+  // As on a resume whose transcript cannot be read: the rows are drawn only.
+  world(on, {}, jsonl([]))
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  await drawRow($, 'old', 'continue')
+  await drawRow($, 'placeholder', 'go on')
+  await drawRow($, 's1', 'go on')
+  await $.turn.start({ text: 'go on', turnId: 't1' })
+  await sendQueued($, 'continue', ['q1', 'q2', 's2'])
+  expect(await railLabels($)).toEqual(['continue', 'go on', 'continue'])
+})
+
 test('a tool row at the top of the viewport places the reader under its prompt', async ($, on) => {
   world(on)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })

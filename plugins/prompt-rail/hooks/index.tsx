@@ -438,6 +438,31 @@ export const register: Register = (on, options) => {
     return true
   }
 
+  // A prompt sent while a turn runs is queued, and the engine draws it under
+  // ids it never stores until it is dequeued; then it is drawn under the
+  // provisional id and its stored uuid, as any sent prompt. The ids of rows
+  // added while a turn runs with no provisional row before them, and the text
+  // of the prompt last drawn under the provisional id until its stored row is.
+  const queued = new Set<string>()
+  let submitted: string | undefined
+
+  // List a prompt row as it is drawn; true when the list changed. The
+  // provisional row of a dequeued prompt drops the rows drawn while it was
+  // queued, those with its text and no provisional row before them, so a
+  // prompt drawn at rest or sent by itself is never taken for one.
+  const listDrawn = (id: string, text: string) => {
+    if (id === PROVISIONAL_ID) {
+      const count = entries.length
+      entries = entries.filter(entry => !(queued.has(entry.id) && entry.text === text))
+      submitted = text
+      return entries.length !== count
+    }
+    const isAdded = addPrompt(id, text)
+    if (isAdded && submitted === text) submitted = undefined
+    else if (isAdded && isRunning) queued.add(id)
+    return isAdded
+  }
+
   // Record one onScreen report into the current pass.
   const see = (id: string, isShown: boolean) => {
     const now = Date.now()
@@ -581,6 +606,8 @@ export const register: Register = (on, options) => {
       lastCurrent = -1
       unreachable.clear()
       drawn.clear()
+      queued.clear()
+      submitted = undefined
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       await redrawRail($)
     } else {
@@ -639,9 +666,9 @@ export const register: Register = (on, options) => {
     const text = e.props.text.replace(VIEW_CONTEXT, '').trim()
     if (PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
       drawn.set(rowKey(e.requestId), e.requestId)
-      const isAdded = addPrompt(e.requestId, text)
+      const isListed = listDrawn(e.requestId, text)
       const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
-      if (isAdded || isMoved) redrawRailLater($)
+      if (isListed || isMoved) redrawRailLater($)
     }
     return next(e)
   })
