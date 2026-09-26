@@ -579,6 +579,38 @@ test('a prompt delivered into the running turn is listed once and read on its ow
   expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '┃'])
 })
 
+// A prompt delivered into the running turn: its queue rows around the
+// notification, then, once a tool call ends, the row of its attachment.
+const deliver = async ($: any, text: string, ids: [string, string, string]) => {
+  await drawRow($, ids[0], text)
+  await submit($, text)
+  await drawRow($, ids[1], text)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await drawRow($, ids[2], text)
+}
+
+test('a turn keeps its details when a prompt with its text is delivered into it', async ($, on) => {
+  queueWorld(on)
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await sendFirst($, 'continue', 's1')
+  await deliver($, 'continue', ['q1', 'q2', 'a1'])
+  await $.turn.complete({ answer: 'done', durationMs: 12500, isAborted: true, turnId: 't-s1', reason: 'aborted' })
+  expect(await railLabels($)).toEqual(['continue', 'continue'])
+  await drawRow($, 's1', 'continue', { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 continue · 12s · interrupted\s*$/ })).toBeDefined()
+})
+
+test('a delivered prompt keeps its bar when the same text is sent after its turn', async ($, on) => {
+  // As where the transcript cannot be read: the delivery is known from draws only.
+  queueWorld(on)
+  await sendFirst($, 'first', 's1')
+  await deliver($, 'continue', ['q1', 'q2', 'a1'])
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't-s1', reason: 'answer' })
+  await sendFirst($, 'continue', 's2')
+  expect(await railLabels($)).toEqual(['first', 'continue', 'continue'])
+})
+
 // A prompt delivered into the running turn, stored as a queued_command
 // attachment inside the turn the first prompt started.
 const DELIVERED = [

@@ -423,11 +423,16 @@ export const register: Register = (on, options) => {
   // person may send the same text twice.
   let listedAtRest = 0
   let isContinuation = false
-  // The text of the prompt that started the main loop's latest turn.
+  // The text of the prompt that started the main loop's latest turn, and the
+  // id of its entry once its row is drawn (see listDrawn).
   let turnText = ''
-  // The entry of the prompt that started the latest turn: the last with its
-  // text, not the newest, since a prompt delivered into the turn comes after.
+  let starter: string | undefined
+  // The entry of the prompt that started the latest turn, not the newest,
+  // since a prompt delivered into the turn comes after it, with the same text
+  // or not.
   const turnEntry = () => {
+    const started = entries.find(entry => entry.id === starter)
+    if (started) return started
     for (let i = entries.length - 1; i >= 0; i--) if (turnText && entries[i]!.text === turnText) return entries[i]
     return entries[entries.length - 1]
   }
@@ -481,6 +486,12 @@ export const register: Register = (on, options) => {
   // when: the engine may draw a queued prompt's first row before its
   // notification, which then takes it for that prompt's.
   let lately: { id: string; at: number }[] = []
+  // When each waiting text's notification came, and the pending entries
+  // delivered into the running turn: a row of theirs drawn well after the
+  // notification is the attachment the turn read, and no provisional row
+  // follows, so the turn's end leaves them pending no more.
+  const notifiedAt = new Map<string, number>()
+  const delivered = new Set<string>()
 
   const pendingWith = (text: string) => entries.find(entry => pending.has(entry.id) && entry.text === text)
   // The entry a drawn row belongs to, by its own key or as another name.
@@ -495,6 +506,7 @@ export const register: Register = (on, options) => {
   const noteSent = (text: string) => {
     waiting.add(text)
     const now = Date.now()
+    notifiedAt.set(text, now)
     const fresh = new Set(lately.filter(item => now - item.at <= LATELY_MS).map(item => item.id))
     lately = []
     const own = entries.filter(entry => fresh.has(entry.id) && entry.text === text && !pending.has(entry.id))
@@ -520,6 +532,7 @@ export const register: Register = (on, options) => {
       if (provisional === text) {
         provisional = undefined
         waiting.delete(text)
+        if (isRunning) starter = entries.find(entry => rowKey(entry.id) === key)?.id
       }
       return false
     }
@@ -531,6 +544,7 @@ export const register: Register = (on, options) => {
     if (provisional === text) {
       provisional = undefined
       waiting.delete(text)
+      if (isRunning) starter = id
       const held = pendingWith(text)
       if (!held) return addPrompt(id, text)
       // The stored row takes the place of the entry that waited for it.
@@ -546,6 +560,7 @@ export const register: Register = (on, options) => {
         // Another row of the waiting prompt; a jump goes to the one drawn last.
         aliases.set(key, held.id)
         drawn.set(rowKey(held.id), id)
+        if (isRunning && Date.now() - (notifiedAt.get(text) ?? Date.now()) > LATELY_MS) delivered.add(held.id)
         return false
       }
       pending.add(id)
@@ -553,6 +568,8 @@ export const register: Register = (on, options) => {
     }
     const isAdded = addPrompt(id, text)
     if (isAdded) lately = [...lately, { id, at: Date.now() }]
+    // A turn's prompt drawn with no provisional row, as the session's first.
+    if (isAdded && isRunning && starter === undefined && text === turnText) starter = id
     return isAdded
   }
 
@@ -712,6 +729,9 @@ export const register: Register = (on, options) => {
       provisional = undefined
       lately = []
       turnText = ''
+      starter = undefined
+      notifiedAt.clear()
+      delivered.clear()
       Object.assign(seen, { path: '', size: -1, mtimeMs: -1 })
       await redrawRail($)
     } else {
@@ -735,6 +755,7 @@ export const register: Register = (on, options) => {
     isRunning = true
     isContinuation = e.text.trim() === ''
     turnText = e.text.replace(VIEW_CONTEXT, '').trim()
+    starter = undefined
     lately = []
     // Every row of the turns before is stored by now: read them, so a row the
     // index does not know can only be this turn's (see currentIndex).
@@ -756,6 +777,9 @@ export const register: Register = (on, options) => {
       // A prompt still waiting now is queued behind this turn; its rows to
       // come follow its provisional row.
       waiting.clear()
+      notifiedAt.clear()
+      for (const id of delivered) pending.delete(id)
+      delivered.clear()
       lately = []
       listedAtRest = entries.length
       if (entry) {
