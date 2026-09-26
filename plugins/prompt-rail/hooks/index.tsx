@@ -219,21 +219,55 @@ const liveBranch = (rows: any[]) => {
   return live
 }
 
-// The person's prompts on the live branch of a transcript JSONL, in order,
+// What the index reads of a transcript row, and nothing else: a long
+// session's rows are kept between reads, and most of their bytes are tool
+// results and replies the rail never shows. Undefined for a line that is not
+// a row (a torn last line while the engine appends, or no uuid).
+const parseRow = (line: string): any => {
+  let row: any
+  try {
+    row = JSON.parse(line)
+  } catch {
+    return undefined
+  }
+  if (typeof row?.uuid !== 'string') return undefined
+  const content = row.message?.content
+  const blocks = Array.isArray(content)
+    ? content.flatMap((block: any) => {
+        if (block?.type === 'text' && typeof block.text === 'string') return [{ type: 'text', text: block.text }]
+        if (block?.type === 'tool_result') return [{ type: 'tool_result' }]
+        if (block?.type === 'tool_use' && typeof block.id === 'string') {
+          const path = block.input?.file_path
+          return [{ type: 'tool_use', id: block.id, name: block.name, input: typeof path === 'string' ? { file_path: path } : {} }]
+        }
+        return []
+      })
+    : content
+  return {
+    uuid: row.uuid,
+    parentUuid: row.parentUuid,
+    logicalParentUuid: row.logicalParentUuid,
+    isSidechain: row.isSidechain,
+    type: row.type,
+    subtype: row.subtype,
+    durationMs: row.durationMs,
+    isApiErrorMessage: row.isApiErrorMessage,
+    isMeta: row.isMeta,
+    isCompactSummary: row.isCompactSummary,
+    timestamp: row.timestamp,
+    message: row.message && { role: row.message.role, content: typeof content === 'string' ? content : blocks },
+    attachment: row.attachment?.type === 'queued_command' ? { type: row.attachment.type, prompt: row.attachment.prompt } : undefined,
+  }
+}
+
+// The rows of a transcript JSONL's text, in order.
+const parseRows = (jsonl: string) => jsonl.split('\n').flatMap(line => (line.trim() ? (parseRow(line) ?? []) : []))
+
+// The person's prompts on the live branch of a transcript's rows, in order,
 // keyed by message uuid, and the prompt each reply row and tool call answers
 // (a tool row is drawn under its tool_use id). Tool results, meta rows,
 // sidechains and the engine's wrapper rows are not prompts.
-const indexTranscript = (jsonl: string): TranscriptIndex => {
-  const rows: any[] = []
-  for (const line of jsonl.split('\n')) {
-    if (!line.trim()) continue
-    try {
-      const row = JSON.parse(line)
-      if (typeof row?.uuid === 'string') rows.push(row)
-    } catch {
-      // A torn last line while the engine appends; the next read has it whole.
-    }
-  }
+const indexRows = (rows: any[]): TranscriptIndex => {
   const live = liveBranch(rows)
   const prompts: Entry[] = []
   const owners: [string, number][] = []
@@ -324,7 +358,7 @@ async function readTranscript($: EngineInterface, transcriptPath: string, seen: 
   try {
     const { size, mtimeMs } = await $.fs.stat(transcriptPath)
     if (seen.path === transcriptPath && seen.size === size && seen.mtimeMs === mtimeMs) return undefined
-    const index = indexTranscript(await $.fs.read(transcriptPath))
+    const index = indexRows(parseRows(await $.fs.read(transcriptPath)))
     Object.assign(seen, { path: transcriptPath, size, mtimeMs })
     return index
   } catch {
