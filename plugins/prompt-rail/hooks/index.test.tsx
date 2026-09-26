@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, noteScroll, stepFrom, tick, turnLine } from './index.tsx'
+import { bar, drawnRow, noteScroll, rowKey, stepFrom, tick, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -384,6 +384,69 @@ test('a repeated prompt gets its own entry; the provisional row is not listed', 
   await draw('placeholder', 'continue')
   await draw('x2', 'continue')
   expect(await railLabels($)).toEqual(['continue', 'continue'])
+})
+
+// A message the engine splits into rows is drawn under ids derived from its
+// stored uuid: the first four groups, then the row's index (seen in 2.1.283).
+const SPLIT_IDS = {
+  first: 'dae2bfb1-3f75-4882-a3e4-6f43dc45b51c',
+  firstRow: 'dae2bfb1-3f75-4882-a3e4-000000000000',
+  reply: 'e59aaf08-414b-4bb2-9945-895150ed76c7',
+  replyRow: 'e59aaf08-414b-4bb2-9945-000000000001',
+  second: '35939e29-64ae-48ff-bc1d-432a998b2414',
+}
+const SPLIT = jsonl([
+  { type: 'user', uuid: SPLIT_IDS.first, message: { role: 'user', content: 'first' } },
+  { type: 'assistant', uuid: SPLIT_IDS.reply, message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } },
+  { type: 'user', uuid: SPLIT_IDS.second, message: { role: 'user', content: 'second' } },
+])
+const drawSplit = ($: any, component: 'UserMessage' | 'AssistantMessage', requestId: string, onScreen: { first: number; last: number; of: number } | null) =>
+  $.ui.mount({
+    plugin: 'prompt-rail',
+    surface: 'terminal',
+    component,
+    requestId,
+    props: component === 'UserMessage' ? prompt('first', onScreen) : { text: 'reply', isFirstOfReply: true, onScreen },
+  })
+
+test('a prompt drawn under an id derived from its stored uuid is listed once, drawn first', async ($, on) => {
+  world(on, {}, SPLIT)
+  await drawSplit($, 'UserMessage', SPLIT_IDS.firstRow, null)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['first', 'second'])
+})
+
+test('a prompt drawn under an id derived from its stored uuid is listed once, read first', async ($, on) => {
+  world(on, {}, SPLIT)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await drawSplit($, 'UserMessage', SPLIT_IDS.firstRow, null)
+  expect(await railLabels($)).toEqual(['first', 'second'])
+})
+
+test('a prompt row on screen under a derived id places the reader under that prompt', async ($, on) => {
+  world(on, {}, SPLIT)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await drawSplit($, 'UserMessage', SPLIT_IDS.firstRow, { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['┃', '│'])
+})
+
+test('a reply row on screen under a derived id places the reader under its prompt', async ($, on) => {
+  world(on, {}, SPLIT)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await drawSplit($, 'AssistantMessage', SPLIT_IDS.replyRow, { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['┃', '│'])
+})
+
+test('a jump to a stored prompt scrolls to the id its row was drawn under', () => {
+  const drawn = new Map([[rowKey(SPLIT_IDS.firstRow), SPLIT_IDS.firstRow]])
+  expect(drawnRow(drawn, SPLIT_IDS.first)).toBe(SPLIT_IDS.firstRow)
+  // A prompt not drawn yet is looked for under its own id.
+  expect(drawnRow(drawn, SPLIT_IDS.second)).toBe(SPLIT_IDS.second)
+  expect(drawnRow(drawn, 'u1')).toBe('u1')
 })
 
 test('a tool row at the top of the viewport places the reader under its prompt', async ($, on) => {
@@ -886,6 +949,21 @@ test('a turn that just ended shows the duration the engine reported before the t
   expect(await band.find({ type: 'Text', text: /^#2 second · 12s\s*$/ })).toBeDefined()
   // The turn_duration row the transcript records wins where it has one.
   expect(await band.find({ type: 'Text', text: /^#1 first · 1m 23s · 4 tools · app\.ts, README\.md\s*$/ })).toBeDefined()
+})
+
+test('what the engine reported of a turn stays with its prompt once the stored row replaces a derived one', async ($, on) => {
+  const disk = beneath(jsonl([]))
+  world(on, {}, disk.transcript, disk)
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await drawSplit($, 'UserMessage', SPLIT_IDS.firstRow, null)
+  await $.turn.complete({ answer: 'done', durationMs: 12500, isAborted: true, turnId: 'main', reason: 'aborted' })
+  disk.transcript = jsonl([{ type: 'user', uuid: SPLIT_IDS.first, message: { role: 'user', content: 'first' } }])
+  disk.mtimeMs = 2
+  await $.classic.Stop({ session_id: 's1', transcript_path: '/t/s1.jsonl', stop_hook_active: false })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ type: 'Text', text: /^#1 first · 12s · interrupted\s*$/ })).toBeDefined()
 })
 
 test('next and prev wait while a subagent transcript is in view', async ($, on) => {
