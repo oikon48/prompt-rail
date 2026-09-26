@@ -30,8 +30,10 @@ const PROVISIONAL_ID = 'placeholder'
 // mode, reminders), which are not prompts.
 const WRAPPER = /^<(command-|local-command-|bash-|system-reminder|task-notification|user-prompt-submit-hook)/
 // The viewer's state the engine puts ahead of a prompt sent while an artifact
-// is open; the typed text follows it.
-const VIEW_CONTEXT = /^\s*<artifact-view-context\b[^>]*>[\s\S]*?<\/artifact-view-context>/
+// is open; the typed text follows it. No row field tells it from typed text,
+// so only the engine's layout matches: the artifact id, a JSON line starting
+// with "context", and the closing tag on a line of its own.
+const VIEW_CONTEXT = /^\s*<artifact-view-context artifact="[^"]*">\n\{"context":[\s\S]*?\n<\/artifact-view-context>/
 // The notice the engine stores as a user row when the person interrupts a turn.
 const INTERRUPTED = /^\[Request interrupted by user/
 // onScreen reports that arrive within this many ms of each other are one pass

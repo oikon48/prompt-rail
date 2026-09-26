@@ -364,6 +364,15 @@ test('the artifact view context ahead of a drawn prompt is left out of its text'
   expect(await railLabels($)).toEqual(['swap the image'])
 })
 
+test('a typed artifact view context tag is kept, since it is not the viewer\'s state', async ($, on) => {
+  world(on, {}, jsonl([]))
+  const typed = '<artifact-view-context artifact="demo">example</artifact-view-context> explain this'
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'v1', props: prompt(typed, null) })
+  const labels = await railLabels($)
+  expect(labels.length).toBe(1)
+  expect(labels[0]).toMatch(/^<artifact-view-context artifact="de/)
+})
+
 test('a repeated prompt gets its own entry; the provisional row is not listed', async ($, on) => {
   world(on)
   const draw = async (requestId: string, text: string) => {
