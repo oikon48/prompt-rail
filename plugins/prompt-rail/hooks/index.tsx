@@ -572,20 +572,26 @@ type Settle = { quiet?: Timer; latest?: Timer }
 // report, and no later than SETTLE_MAX_MS after the first, so reports that
 // never pause (a scroll held down, a running tool row) still redraw it. A
 // remounted row replays where it was last seen and a layout may settle over
-// two frames; the surface corrects both within a frame or two. `onQuiet` runs
-// first when the reports paused, not when the wait ran out.
-function redrawRailSettled($: EngineInterface, settle: Settle, onQuiet: () => void, isStale: () => boolean) {
-  const fire = (isQuiet: boolean) => {
+// two frames; the surface corrects both within a frame or two.
+function redrawRailSettled($: EngineInterface, settle: Settle, isStale: () => boolean) {
+  const fire = () => {
     settle.quiet?.cancel()
     settle.latest?.cancel()
     settle.quiet = undefined
     settle.latest = undefined
-    if (isQuiet) onQuiet()
     if (isStale()) void redrawRail($)
   }
   settle.quiet?.cancel()
-  settle.quiet = $.clock.after(SETTLE_MS, () => fire(true))
-  settle.latest ??= $.clock.after(SETTLE_MAX_MS, () => fire(false))
+  settle.quiet = $.clock.after(SETTLE_MS, fire)
+  settle.latest ??= $.clock.after(SETTLE_MAX_MS, fire)
+}
+
+// After one onScreen report: a row that said it is cut at the viewport's top
+// is confirmed once a replay would have been corrected (see SETTLE_MS), and
+// the rail is drawn again once reports settle.
+function afterReport<Row>($: EngineInterface, settle: Settle, cut: Row | undefined, confirm: (row: Row) => void, isStale: () => boolean) {
+  if (cut !== undefined) $.clock.after(SETTLE_MS, () => confirm(cut))
+  redrawRailSettled($, settle, isStale)
 }
 
 // The transcript path remembered for this session, if any.
@@ -646,7 +652,8 @@ export const register: Register = (on, options) => {
   // where it is on screen, and when it said so. A row reports only when that
   // changes, so one that stays whole in the viewport is silent while others
   // scroll past it; it is dropped once it says it left.
-  const onScreen = new Map<string, { key: string; first: number; order: number }>()
+  type Shown = { name: string; key: string; first: number; order: number }
+  const onScreen = new Map<string, Shown>()
   let reports = 0
   // The row key of the prompt being read, kept while no known row shows.
   let reading: string | undefined
@@ -777,12 +784,18 @@ export const register: Register = (on, options) => {
 
   // Record one onScreen report: where a row is on screen, or null once it left.
   // Rows drawn while a subagent's transcript is in view are not the main
-  // conversation's, which alone the rail lists.
+  // conversation's, which alone the rail lists. Returns the row when it says
+  // it is cut at the viewport's top, for dropAbove to confirm.
   const see = (component: string, id: string, place: { first: number } | null) => {
-    if (viewAgent !== undefined) return
+    if (viewAgent !== undefined) return undefined
     const name = `${component}\u0000${id}`
-    if (place === null) onScreen.delete(name)
-    else onScreen.set(name, { key: rowKey(id), first: place.first, order: ++reports })
+    if (place === null) {
+      onScreen.delete(name)
+      return undefined
+    }
+    const row = { name, key: rowKey(id), first: place.first, order: ++reports }
+    onScreen.set(name, row)
+    return row.first > 0 ? row : undefined
   }
 
   // The index of the prompt a drawn row belongs to, a reply counting as its
@@ -818,25 +831,27 @@ export const register: Register = (on, options) => {
     return top?.i
   }
 
-  // Once reports pause, drop the rows above the top one for good, so they
-  // cannot come back when it turns whole. Not sooner: a remounted row replays
-  // where it was last seen and says where it is a frame later.
-  const dropAboveTop = () => {
+  // A row still cut at the viewport's top a while after it said so is the top
+  // one: drop the rows of earlier prompts for good, so they cannot come back
+  // when it turns whole. Not sooner: a remounted row replays where it was last
+  // seen and says where it is a frame later. Not when a row of an earlier
+  // prompt said it is on screen since, as then the viewport moved above it.
+  const dropAbove = (cut: Shown) => {
+    const row = onScreen.get(cut.name)
+    if (!row || row.first <= 0) return
     const promptIndex = promptIndexes()
-    const top = topIndex(promptIndex)
+    const top = indexOfRow(row.key, promptIndex)
     if (top === undefined) return
-    for (const [name, row] of onScreen) {
-      const i = indexOfRow(row.key, promptIndex)
-      if (i !== undefined && i < top) onScreen.delete(name)
-    }
+    const isAbove = (other: Shown) => (indexOfRow(other.key, promptIndex) ?? top) < top
+    if ([...onScreen.values()].some(other => other.order > row.order && isAbove(other))) return
+    for (const [name, other] of onScreen) if (isAbove(other)) onScreen.delete(name)
   }
 
   // Where the person is reading: the prompt that the topmost row on screen
   // belongs to. Kept while no known row shows.
   const currentIndex = () => {
     const promptIndex = promptIndexes()
-    // Rows above the top one are read past, not dropped, until reports pause
-    // (see dropAboveTop).
+    // Rows above the top one are read past until it is confirmed (see dropAbove).
     const top = topIndex(promptIndex)
     let best = -1
     for (const row of onScreen.values()) {
@@ -860,7 +875,8 @@ export const register: Register = (on, options) => {
   // and one that unmounts may never report it left.
   const landOn = (id: string, target: string) => {
     onScreen.clear()
-    onScreen.set(`UserMessage\u0000${target}`, { key: rowKey(target), first: 0, order: ++reports })
+    const name = `UserMessage\u0000${target}`
+    onScreen.set(name, { name, key: rowKey(target), first: 0, order: ++reports })
     reading = rowKey(id)
   }
 
@@ -1101,8 +1117,7 @@ export const register: Register = (on, options) => {
       drawn.set(rowKey(e.requestId), e.requestId)
       if (listDrawn(e.requestId, text)) redrawRailLater($)
       if (e.props.onScreen !== undefined) {
-        see(e.component, e.requestId, e.props.onScreen)
-        redrawRailSettled($, settle, dropAboveTop, isDrawnStale)
+        afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
       }
     }
     return next(e)
@@ -1113,30 +1128,26 @@ export const register: Register = (on, options) => {
   // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
     if (e.props.onScreen !== undefined) {
-      see(e.component, e.requestId, e.props.onScreen)
-      redrawRailSettled($, settle, dropAboveTop, isDrawnStale)
+      afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
     }
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     if (e.props.onScreen !== undefined) {
-      see(e.component, e.requestId, e.props.onScreen)
-      redrawRailSettled($, settle, dropAboveTop, isDrawnStale)
+      afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
     }
     return next(e)
   })
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
     if (e.props.onScreen !== undefined) {
-      see(e.component, e.requestId, e.props.onScreen)
-      redrawRailSettled($, settle, dropAboveTop, isDrawnStale)
+      afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
     }
     return next(e)
   })
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
     if (id && e.props.onScreen !== undefined) {
-      see(e.component, id, e.props.onScreen)
-      redrawRailSettled($, settle, dropAboveTop, isDrawnStale)
+      afterReport($, settle, see(e.component, id, e.props.onScreen), dropAbove, isDrawnStale)
     }
     return next(e)
   })

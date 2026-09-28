@@ -1745,3 +1745,19 @@ test('a row cut at the top that left untold does not hold the reader when the vi
   await clock.advance(200)
   expect(await heavyIn(band)).toBe(0)
 })
+
+test('rows that left untold are dropped even while reports never pause', async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  // u1 was cut at the top when the viewport jumped away without it saying so.
+  await mountRow($, 'u1', 'first stored prompt', { first: 1, last: 1, of: 2 })
+  const tool = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'ToolUse', requestId: 'toolu_running', props: runningTool({ first: 0, last: 1, of: 9 }) })
+  const u3 = await mountRow($, 'u3', 'continue', { first: 1, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  // A running tool row keeps drawing every 30 ms; u3 turns whole at the top meanwhile.
+  for (let at = 0; at < 300; at += 30) {
+    await clock.advance(30)
+    await tool.redraw(runningTool({ first: 0, last: 1, of: 9 }))
+    if (at === 150) await u3.redraw(prompt('continue', { first: 0, last: 1, of: 2 }))
+  }
+  expect(await heavyIn(band)).toBe(2)
+})
