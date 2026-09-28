@@ -954,12 +954,13 @@ test('a scroll redraws the rail only when the prompt being read changes, and nev
   const before = { invalidations: disk.invalidations, railRedraws: disk.railRedraws }
   // The lower row leaves the viewport; the topmost one, and so the prompt being read, stays.
   await u2.redraw(prompt('<div> why does this overflow?', null))
-  await clock.settle()
+  // The rail is drawn again once the reports settle.
+  await clock.advance(200)
   expect(disk.railRedraws).toBe(before.railRedraws)
   // Now the top row leaves as the next one enters: the prompt being read moves.
   await u1.redraw(prompt('first stored prompt', null))
   await u2.redraw(prompt('<div> why does this overflow?', shown))
-  await clock.settle()
+  await clock.advance(200)
   expect(disk.railRedraws).toBe(before.railRedraws + 1)
   expect(await heavy()).toBe(1)
   // Drawing every transcript row again mid-scroll moves the viewport the
@@ -1524,4 +1525,223 @@ test('a late reply of the turn before stays with its prompt once a new one is se
   await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AssistantMessage', requestId: 'late', props: { text: 'done', onScreen: { first: 0, last: 1, of: 2 } } })
   const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect(await band.find({ type: 'Text', text: /^#4 continue$/ })).toBeDefined()
+})
+
+// The engine reports a row's onScreen only when it changes, so a row that
+// stays whole in the viewport is silent while another scrolls past it. A real
+// pause between two reports, so reports read together only because they came
+// together cannot pass these tests.
+const quiet = () => new Promise(resolve => setTimeout(resolve, 200))
+
+// A tool row of the running turn, which no transcript read knows yet.
+const runningTool = (onScreen: { first: number; last: number; of: number } | null) => ({
+  tool_use_id: 'toolu_running',
+  tool: 'Bash',
+  input: {},
+  isRunning: true,
+  isErrored: false,
+  isInterrupted: false,
+  onScreen,
+})
+
+const runFifth = async ($: any, on: any) => {
+  world(on)
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  const clock = mock.clock(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await $.turn.start({ text: 'fifth', turnId: 't5' })
+  const u5 = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u5', props: prompt('fifth', null) })
+  await u5.unmount()
+  return clock
+}
+
+test('a scroll that brings a whole row to the top keeps the reader under it, not the running turn', async ($, on) => {
+  const clock = await runFifth($, on)
+  // u3 at the top, u4 whole below it, the running turn's tool row at the bottom.
+  const u3 = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u3', props: prompt('continue', { first: 1, last: 1, of: 2 }) })
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u4', props: prompt('continue', { first: 0, last: 1, of: 2 }) })
+  const tool = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'ToolUse', requestId: 'toolu_running', props: runningTool({ first: 0, last: 1, of: 5 }) })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const heavy = async () => (await band.findAll({ type: 'Button' })).map((b: any) => b.props.label).indexOf('┃')
+  await clock.settle()
+  expect(await heavy()).toBe(2)
+  await quiet()
+  // Scroll down a row: u3 leaves, u4 now starts at the top but was whole
+  // before and stays whole, so only u3 and the tool row report.
+  await u3.redraw(prompt('continue', null))
+  await tool.redraw(runningTool({ first: 0, last: 2, of: 5 }))
+  await clock.advance(200)
+  expect(await heavy()).toBe(3)
+})
+
+test('a running tool row first drawn at the bottom of the viewport does not take the reader to it', async ($, on) => {
+  const clock = await runFifth($, on)
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'u4', props: prompt('continue', { first: 1, last: 1, of: 2 }) })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const heavy = async () => (await band.findAll({ type: 'Button' })).map((b: any) => b.props.label).indexOf('┃')
+  await clock.settle()
+  expect(await heavy()).toBe(3)
+  await quiet()
+  // The turn calls a tool; its row is drawn under the viewport's bottom edge
+  // before the layout moves the rows above it.
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'ToolUse', requestId: 'toolu_running', props: runningTool({ first: 0, last: 1, of: 2 }) })
+  await clock.settle()
+  expect(await heavy()).toBe(3)
+})
+
+const mountRow = ($: any, requestId: string, text: string, onScreen: { first: number; last: number; of: number } | null) =>
+  $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId, props: prompt(text, onScreen) })
+
+const heavyIn = async (band: any) => (await band.findAll({ type: 'Button' })).map((b: any) => b.props.label).indexOf('┃')
+
+const horizontalWorld = async ($: any, on: any, transcript = TRANSCRIPT) => {
+  const disk = beneath(transcript)
+  world(on, {}, transcript, disk)
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  const clock = mock.clock(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  return { disk, clock }
+}
+
+test('a row cut at the viewport top places the reader there, over rows that left untold', async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  // u1 was cut at the top, then left in a jump that never said so.
+  await mountRow($, 'u1', 'first stored prompt', { first: 1, last: 1, of: 2 })
+  await mountRow($, 'u4', 'continue', { first: 1, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(3)
+})
+
+test('a row replayed on screen for a moment, then corrected, moves no one', async ($, on) => {
+  const { disk, clock } = await horizontalWorld($, on)
+  await mountRow($, 'u2', '<div> why does this overflow?', { first: 0, last: 1, of: 2 })
+  await mountRow($, 'u3', 'continue', { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(1)
+  const before = disk.railRedraws
+  // A remounted row replays where it was last seen, and the surface corrects it a frame later.
+  const u4 = await mountRow($, 'u4', 'continue', { first: 12, last: 25, of: 26 })
+  await clock.advance(13)
+  await u4.redraw(prompt('continue', null))
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(1)
+  expect(disk.railRedraws).toBe(before)
+})
+
+test('scrolling up places the reader at the row that entered at the top last', async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  const u3 = await mountRow($, 'u3', 'continue', { first: 1, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(2)
+  await u3.redraw(prompt('continue', { first: 0, last: 1, of: 2 }))
+  await mountRow($, 'u2', '<div> why does this overflow?', { first: 1, last: 1, of: 2 })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(1)
+})
+
+test('a turn that starts while the person reads leaves the reader where they are', async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  await mountRow($, 'u2', '<div> why does this overflow?', { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(1)
+  await quiet()
+  // A continuation moves nothing; its first tool row is drawn at the bottom.
+  await $.turn.start({ text: '', turnId: 't5' })
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'ToolUse', requestId: 'toolu_running', props: runningTool({ first: 0, last: 1, of: 2 }) })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(1)
+})
+
+test("rows drawn while a subagent's transcript is in view do not place the reader", async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, view: { agentId: 'a1' } } })
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'ToolUse', requestId: 'toolu_sub', props: { ...runningTool({ first: 3, last: 5, of: 9 }), tool_use_id: 'toolu_sub' } })
+  await band.redraw(BAND)
+  await mountRow($, 'u2', '<div> why does this overflow?', { first: 0, last: 1, of: 2 })
+  await clock.advance(200)
+  await band.redraw(BAND)
+  expect(await heavyIn(band)).toBe(1)
+})
+
+test('reports that never pause still redraw the rail within a bounded wait', async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  const u2 = await mountRow($, 'u2', '<div> why does this overflow?', { first: 1, last: 1, of: 2 })
+  const tool = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'ToolUse', requestId: 'toolu_running', props: runningTool({ first: 0, last: 1, of: 9 }) })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(1)
+  await u2.redraw(prompt('<div> why does this overflow?', null))
+  await mountRow($, 'u3', 'continue', { first: 1, last: 1, of: 2 })
+  // A tool row keeps drawing every 30 ms, as a running one does.
+  for (let at = 0; at < 150; at += 30) {
+    await clock.advance(30)
+    await tool.redraw(runningTool({ first: 0, last: 1, of: 9 }))
+  }
+  expect(await heavyIn(band)).toBe(2)
+})
+
+test('the prompt being read stays itself when a rewind drops an earlier one', async ($, on) => {
+  const { disk, clock } = await horizontalWorld($, on)
+  await mountRow($, 'u4', 'continue', { first: 1, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(3)
+  disk.transcript = jsonl([
+    { type: 'user', uuid: 'u1', message: { role: 'user', content: 'first stored prompt' } },
+    { type: 'user', uuid: 'u3', message: { role: 'user', content: 'continue' } },
+    { type: 'user', uuid: 'u4', message: { role: 'user', content: 'continue' } },
+  ])
+  disk.mtimeMs = 2
+  await stop($)
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(2)
+})
+
+test('rows split from one message are seen apart', async ($, on) => {
+  const { clock } = await horizontalWorld($, on, SPLIT)
+  const top = await drawSplit($, 'UserMessage', SPLIT_IDS.firstRow, { first: 1, last: 1, of: 2 })
+  await drawSplit($, 'UserMessage', 'dae2bfb1-3f75-4882-a3e4-000000000001', { first: 0, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(0)
+  await quiet()
+  // The first row leaves at the top; its sibling stays whole and silent.
+  await top.redraw(prompt('first', null))
+  await mountRow($, SPLIT_IDS.second, 'second', { first: 0, last: 0, of: 2 })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(0)
+})
+
+test('rows that left untold stay gone once a row cut at the top has settled', async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  // u1 was cut at the top when the viewport jumped away without it saying so.
+  await mountRow($, 'u1', 'first stored prompt', { first: 1, last: 1, of: 2 })
+  const u4 = await mountRow($, 'u4', 'continue', { first: 1, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(3)
+  // A scroll up brings u4 whole to the very top; no row is cut there now.
+  await u4.redraw(prompt('continue', { first: 0, last: 1, of: 2 }))
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(3)
+})
+
+test('a row cut at the top that left untold does not hold the reader when the viewport moves above it', async ($, on) => {
+  const { clock } = await horizontalWorld($, on)
+  // u3 is cut at the top; a long scroll up unmounts it without it saying so.
+  await mountRow($, 'u3', 'continue', { first: 1, last: 1, of: 2 })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(2)
+  // The rows drawn at the new place start whole at the very top.
+  await mountRow($, 'u1', 'first stored prompt', { first: 0, last: 1, of: 2 })
+  await mountRow($, 'u2', '<div> why does this overflow?', { first: 0, last: 1, of: 2 })
+  await clock.advance(200)
+  expect(await heavyIn(band)).toBe(0)
 })
