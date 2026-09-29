@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+
+- Fixed the heavy bar jumping for a moment to a later prompt, the newest while a turn runs, as the transcript scrolled: a row that stays whole in the viewport does not report while others scroll past it, so the rail lost the row at the top; it now keeps each row until it reports that it left, and places the reader after a jump it makes, whatever rows left without saying so
+
 ## 0.6.0
 
 - Removed the digit hotkeys from the vertical pane: a click focuses the pane, so the first nine rows grew a `1:` prefix and shifted under the pointer, and the digits reached only the oldest nine prompts; a click and `/prompt-rail next` and `prev` jump to a prompt
