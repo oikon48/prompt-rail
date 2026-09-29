@@ -1,4 +1,4 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 const PANE = 'prompt-rail'
 // Rows the person typed (terminal composer, desktop/remote bridge, SDK host).
@@ -38,9 +38,12 @@ const VIEW_CONTEXT = /^\s*<artifact-view-context artifact="[^"]*">\n\{"context":
 const INTERRUPTED = /^\[Request interrupted by user/
 // A message uuid, as the transcript stores it (see rowKey).
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-// onScreen reports that arrive within this many ms of each other are one pass
-// of the surface (a scroll, or a redraw), read together.
-const PASS_MS = 150
+// The rail is drawn again this many ms after the last onScreen report, and no
+// later than SETTLE_MAX_MS after the first (see redrawRailSettled). Measured
+// on the terminal: a replayed row is corrected within 13 ms, a layout settles
+// within 18 ms.
+const SETTLE_MS = 40
+const SETTLE_MAX_MS = 120
 // A row added at most this many ms before a prompt's notification may be that
 // prompt's own: the engine draws a queued prompt's first row as it notifies.
 const LATELY_MS = 250
@@ -536,14 +539,17 @@ async function writeMode($: EngineInterface, mode: Mode) {
 
 // Scroll the transcript to a prompt's row, drawn under `target`, from a
 // dispatch that answers the person's own input (a press, a typed command): a
-// transcript row moves only then. Records whether the prompt could be reached.
+// transcript row moves only then. Records whether the prompt could be reached,
+// and returns whether the transcript scrolled to it.
 async function jumpTo($: EngineInterface, id: string, target: string, unreachable: Set<string>) {
   try {
     const result = await $.ui.scroll({ to: { requestId: target }, block: 'start' })
     if (result.deny) $.ui.toast(`prompt-rail: ${result.deny}`)
     if (noteScroll(unreachable, id, result.deny)) await redrawRail($)
+    return !result.deny
   } catch (err) {
     $.ui.toast(`prompt-rail: ${(err as Error).message}`)
+    return false
   }
 }
 
@@ -556,6 +562,36 @@ async function redrawRail($: EngineInterface) {
 // The same from a render hook, which may not write state: once its dispatch ends.
 function redrawRailLater($: EngineInterface) {
   $.clock.after(0, () => void redrawRail($))
+}
+
+// The timers of a redraw waiting for onScreen reports to settle.
+type Settle = { quiet?: Timer; latest?: Timer }
+
+// Draw the rail again once onScreen reports settle, if `isStale` then says the
+// drawing no longer shows the prompt being read: SETTLE_MS after the last
+// report, and no later than SETTLE_MAX_MS after the first, so reports that
+// never pause (a scroll held down, a running tool row) still redraw it. A
+// remounted row replays where it was last seen and a layout may settle over
+// two frames; the surface corrects both within a frame or two.
+function redrawRailSettled($: EngineInterface, settle: Settle, isStale: () => boolean) {
+  const fire = () => {
+    settle.quiet?.cancel()
+    settle.latest?.cancel()
+    settle.quiet = undefined
+    settle.latest = undefined
+    if (isStale()) void redrawRail($)
+  }
+  settle.quiet?.cancel()
+  settle.quiet = $.clock.after(SETTLE_MS, fire)
+  settle.latest ??= $.clock.after(SETTLE_MAX_MS, fire)
+}
+
+// After one onScreen report: a row that said it is cut at the viewport's top
+// is confirmed once a replay would have been corrected (see SETTLE_MS), and
+// the rail is drawn again once reports settle.
+function afterReport<Row>($: EngineInterface, settle: Settle, cut: Row | undefined, confirm: (row: Row) => void, isStale: () => boolean) {
+  if (cut !== undefined) $.clock.after(SETTLE_MS, () => confirm(cut))
+  redrawRailSettled($, settle, isStale)
 }
 
 // The transcript path remembered for this session, if any.
@@ -611,11 +647,20 @@ export const register: Register = (on, options) => {
     if (!turn && ms === undefined && outcome === undefined) return undefined
     return { tools: 0, files: [], ...turn, ...(ms === undefined ? {} : { durationMs: ms }), ...(outcome ? { outcome } : {}) }
   }
-  // The latest pass of onScreen reports: which transcript rows (prompts,
-  // replies, tool rows) it said the viewport shows, by id. Only this pass is
-  // read, since a row that left away from the viewport's edges is not told.
-  let pass = { at: 0, rows: new Map<string, boolean>() }
-  let lastCurrent = -1
+  // The transcript rows (prompts, replies, tool rows) the viewport shows, by
+  // component and the id each is drawn under: the key its prompt is found by,
+  // where it is on screen, and when it said so. A row reports only when that
+  // changes, so one that stays whole in the viewport is silent while others
+  // scroll past it; it is dropped once it says it left.
+  type Shown = { name: string; key: string; first: number; order: number }
+  const onScreen = new Map<string, Shown>()
+  let reports = 0
+  // The row key of the prompt being read, kept while no known row shows.
+  let reading: string | undefined
+  // The prompt the rail last drew as being read, and the redraw waiting for
+  // reports to settle.
+  let drawnCurrent = -1
+  const settle: Settle = {}
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
   const seen: Seen = unseen()
@@ -737,44 +782,115 @@ export const register: Register = (on, options) => {
     return isAdded
   }
 
-  // Record one onScreen report into the current pass.
-  const see = (id: string, isShown: boolean) => {
-    const now = Date.now()
-    if (now - pass.at > PASS_MS) pass = { at: now, rows: new Map() }
-    pass.at = now
-    pass.rows.set(rowKey(id), isShown)
-  }
-
-  // Where the person is reading: the prompt that the topmost row of the latest
-  // pass belongs to, a reply counting as its prompt's. A scroll reports the
-  // rows at the viewport's edges, a redraw every row, so the topmost shown row
-  // of either is the viewport's top. Kept while no known row shows.
-  const currentIndex = () => {
-    const promptIndex = new Map(entries.map((entry, i) => [rowKey(entry.id), i]))
-    let best = -1
-    for (const [key, isShown] of pass.rows) {
-      if (!isShown || key === PROVISIONAL_ID) continue
-      const id = entryKeyOf(key)
-      const ownerId = owners.get(id)
-      // A reply or tool row the transcript read does not know was written
-      // after it: the Stop hook reads before the turn's last reply is stored,
-      // and a running turn's rows come later still. A turn's start reads the
-      // file again, so only the newest turn can own it.
-      const i = promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
-      if (i !== undefined && (best < 0 || i < best)) best = i
+  // Record one onScreen report: where a row is on screen, or null once it left.
+  // Rows drawn while a subagent's transcript is in view are not the main
+  // conversation's, which alone the rail lists. Returns the row when it says
+  // it is cut at the viewport's top, for dropAbove to confirm.
+  const see = (component: string, id: string, place: { first: number } | null) => {
+    if (viewAgent !== undefined) return undefined
+    const name = `${component}\u0000${id}`
+    if (place === null) {
+      onScreen.delete(name)
+      return undefined
     }
-    if (best >= 0) lastCurrent = best
-    return lastCurrent < entries.length ? lastCurrent : -1
+    const row = { name, key: rowKey(id), first: place.first, order: ++reports }
+    onScreen.set(name, row)
+    return row.first > 0 ? row : undefined
   }
 
-  // Record one onScreen report; true when it moved the prompt being read, the
-  // one thing a report changes in the drawing. A scroll reports the message
-  // at the viewport's top edge among its edges, which settles the prompt
-  // there; only the rail is drawn again for it (see MOVED).
-  const seeMoves = (id: string, isShown: boolean) => {
-    const before = currentIndex()
-    see(id, isShown)
-    return currentIndex() !== before
+  // The index of the prompt a drawn row belongs to, a reply counting as its
+  // prompt's; undefined for a row that places no one.
+  const indexOfRow = (key: string, promptIndex: Map<string, number>) => {
+    if (key === PROVISIONAL_ID) return undefined
+    const id = entryKeyOf(key)
+    const ownerId = owners.get(id)
+    // A reply or tool row the transcript read does not know was written
+    // after it: the Stop hook reads before the turn's last reply is stored,
+    // and a running turn's rows come later still. A turn's start reads the
+    // file again, so only the newest turn can own it.
+    return promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
+  }
+  const promptIndexes = () => new Map(entries.map((entry, i) => [rowKey(entry.id), i]))
+
+  // The prompt of the row that last said it is cut at the viewport's top: that
+  // row is the top one, so a row of an earlier prompt still listed left
+  // without saying so, as rows do in a jump. Unless a row of an earlier prompt
+  // said it is on screen since: the viewport then moved above the cut row,
+  // which left without saying so itself.
+  const topIndex = (promptIndex: Map<string, number>) => {
+    const rows = [...onScreen.values()].flatMap(row => {
+      const i = indexOfRow(row.key, promptIndex)
+      return i === undefined ? [] : [{ i, first: row.first, order: row.order }]
+    })
+    let top: (typeof rows)[number] | undefined
+    for (const row of rows) {
+      if (row.first <= 0 || (top && row.order < top.order)) continue
+      if (rows.some(other => other.i < row.i && other.order > row.order)) continue
+      top = row
+    }
+    return top?.i
+  }
+
+  // A row still cut at the viewport's top a while after it said so is the top
+  // one: drop the rows of earlier prompts for good, so they cannot come back
+  // when it turns whole. Not sooner: a remounted row replays where it was last
+  // seen and says where it is a frame later. Not when a row of an earlier
+  // prompt said it is on screen since, as then the viewport moved above it.
+  const dropAbove = (cut: Shown) => {
+    const row = onScreen.get(cut.name)
+    if (!row || row.first <= 0) return
+    const promptIndex = promptIndexes()
+    const top = indexOfRow(row.key, promptIndex)
+    if (top === undefined) return
+    const isAbove = (other: Shown) => (indexOfRow(other.key, promptIndex) ?? top) < top
+    if ([...onScreen.values()].some(other => other.order > row.order && isAbove(other))) return
+    for (const [name, other] of onScreen) if (isAbove(other)) onScreen.delete(name)
+  }
+
+  // Where the person is reading: the prompt that the topmost row on screen
+  // belongs to. Kept while no known row shows.
+  const currentIndex = () => {
+    const promptIndex = promptIndexes()
+    // Rows above the top one are read past until it is confirmed (see dropAbove).
+    const top = topIndex(promptIndex)
+    let best = -1
+    for (const row of onScreen.values()) {
+      const i = indexOfRow(row.key, promptIndex)
+      if (i === undefined || (top !== undefined && i < top)) continue
+      if (best < 0 || i < best) best = i
+    }
+    const entry = entries[best]
+    if (entry) reading = rowKey(entry.id)
+    if (reading === undefined) return -1
+    // By key, and through another name, so a stored row that takes a pending
+    // entry's place, or a rewind that drops an earlier prompt, keeps it.
+    const key = entryKeyOf(reading)
+    return entries.findIndex(entry => rowKey(entry.id) === key)
+  }
+  // Whether the rail's drawing no longer shows the prompt being read.
+  const isDrawnStale = () => currentIndex() !== drawnCurrent
+
+  // After a jump lands, the rows before it left and the prompt jumped to is
+  // at the top, though rows may not say so: a row that stays whole is silent,
+  // and one that unmounts may never report it left.
+  const landOn = (id: string, target: string) => {
+    onScreen.clear()
+    const name = `UserMessage\u0000${target}`
+    onScreen.set(name, { name, key: rowKey(target), first: 0, order: ++reports })
+    reading = rowKey(id)
+  }
+
+  // Whether the transcript read knows a drawn row, as a prompt or a reply.
+  const isKnownRow = (key: string) => {
+    const id = entryKeyOf(key)
+    return entries.some(entry => rowKey(entry.id) === id) || owners.has(id)
+  }
+
+  // The rail's sites say whose transcript is in view; the rows a switch
+  // leaves were another transcript's, and those it brings report anew.
+  const noteView = (agentId: string | undefined) => {
+    if (agentId !== viewAgent) onScreen.clear()
+    viewAgent = agentId
   }
 
   // A change of the setting reloads this module with the new value.
@@ -832,10 +948,13 @@ export const register: Register = (on, options) => {
         $.ui.toast('prompt-rail: next and prev move through the main conversation; switch back to it first')
         return {}
       }
-      const target = stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)
-      const entry = entries[target]
-      if (entry) await jumpTo($, entry.id, drawnRow(drawn, entry.id), unreachable)
-      else $.ui.toast(`prompt-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
+      const entry = entries[stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)]
+      const target = entry && drawnRow(drawn, entry.id)
+      if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
+        landOn(entry.id, target)
+        if (isDrawnStale()) await redrawRail($)
+      }
+      if (!entry) $.ui.toast(`prompt-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
       return {}
     }
     if (asked && !isMode(asked)) {
@@ -888,8 +1007,9 @@ export const register: Register = (on, options) => {
       reported.clear()
       ended.clear()
       isRunning = false
-      pass = { at: 0, rows: new Map() }
-      lastCurrent = -1
+      onScreen.clear()
+      reading = undefined
+      drawnCurrent = -1
       unreachable.clear()
       drawn.clear()
       filed = new Set()
@@ -938,7 +1058,12 @@ export const register: Register = (on, options) => {
           if (merge(index)) void redrawRail($)
         })
       : undefined
-    if (index) merge(index)
+    if (index) {
+      merge(index)
+      // A row the file no longer holds (rewound or compacted away) would
+      // count as this turn's.
+      for (const [name, row] of onScreen) if (!isKnownRow(row.key)) onScreen.delete(name)
+    }
     await redrawRail($)
     return next(e)
   })
@@ -990,9 +1115,10 @@ export const register: Register = (on, options) => {
     const text = e.props.text.replace(VIEW_CONTEXT, '').trim()
     if (PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
       drawn.set(rowKey(e.requestId), e.requestId)
-      const isListed = listDrawn(e.requestId, text)
-      const isMoved = e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)
-      if (isListed || isMoved) redrawRailLater($)
+      if (listDrawn(e.requestId, text)) redrawRailLater($)
+      if (e.props.onScreen !== undefined) {
+        afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
+      }
     }
     return next(e)
   })
@@ -1001,20 +1127,28 @@ export const register: Register = (on, options) => {
   // answers. Tool rows are drawn under their tool_use id; a collapsed group
   // counts as its first call.
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) redrawRailLater($)
+    if (e.props.onScreen !== undefined) {
+      afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
+    }
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) redrawRailLater($)
+    if (e.props.onScreen !== undefined) {
+      afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
+    }
     return next(e)
   })
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (e.props.onScreen !== undefined && seeMoves(e.requestId, e.props.onScreen !== null)) redrawRailLater($)
+    if (e.props.onScreen !== undefined) {
+      afterReport($, settle, see(e.component, e.requestId, e.props.onScreen), dropAbove, isDrawnStale)
+    }
     return next(e)
   })
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     const id = e.props.calls.find(call => call.tool_use_id)?.tool_use_id
-    if (id && e.props.onScreen !== undefined && seeMoves(id, e.props.onScreen !== null)) redrawRailLater($)
+    if (id && e.props.onScreen !== undefined) {
+      afterReport($, settle, see(e.component, id, e.props.onScreen), dropAbove, isDrawnStale)
+    }
     return next(e)
   })
 
@@ -1034,7 +1168,7 @@ export const register: Register = (on, options) => {
     await $.state.get(MOVED)
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
-    viewAgent = e.props.view.agentId
+    noteView(e.props.view.agentId)
     const nextColumns = isRail ? e.props.bodyColumns : 0
     if (nextColumns !== railColumns) {
       // The band decides from this whether it carries the cards.
@@ -1051,6 +1185,7 @@ export const register: Register = (on, options) => {
       return <Text dimColor>{isRail ? '·' : 'No prompts yet'}</Text>
     }
     const current = currentIndex()
+    drawnCurrent = current
     // Docked on the terminal: one row per prompt, its tick and its text, the
     // whole row pressable. Too narrow for text, ticks alone (the band shows it).
     if (isRail) {
@@ -1097,7 +1232,7 @@ export const register: Register = (on, options) => {
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     await $.state.get(MOVED)
-    viewAgent = e.props.view.agentId
+    noteView(e.props.view.agentId)
     // Nothing while the rail is off, a survey holds the band or a subagent's transcript is in view.
     if (mode === 'off' || e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -1115,6 +1250,7 @@ export const register: Register = (on, options) => {
       // over it; the bar of the prompt being read is heavy.
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
       const current = currentIndex()
+      drawnCurrent = current
       // More prompts than cells: a window of bars centered on the prompt being
       // read (the newest when none is known), `‹` and `›` marking what it hides.
       const isOverflowing = entries.length > width
@@ -1189,7 +1325,11 @@ export const register: Register = (on, options) => {
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
     const entry = entries[index]
-    if (entry) await jumpTo($, entry.id, drawnRow(drawn, entry.id), unreachable)
+    const target = entry && drawnRow(drawn, entry.id)
+    if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
+      landOn(entry.id, target)
+      if (isDrawnStale()) await redrawRail($)
+    }
     return next(e)
   })
 }
