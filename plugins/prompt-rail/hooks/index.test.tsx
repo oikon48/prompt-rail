@@ -130,7 +130,8 @@ test('with no prompt on screen the text line shows the newest one and no bar is 
   expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '│'])
 })
 
-test('the horizontal band rings its bars, starting on the one being read, and shows the ringed card', async ($, on) => {
+test('the horizontal band rings its bars, starting on the one being read, and shows the ringed card for a while', async ($, on) => {
+  const clock = mock.clock(on)
   const moves: (string | undefined)[] = []
   // Stand in for the engine moving the ring.
   on('ui.focus', ($: any, e: any) => {
@@ -149,6 +150,9 @@ test('the horizontal band rings its bars, starting on the one being read, and sh
   // The text line follows the ring, not the prompt being read.
   expect(await band.find({ type: 'Text', text: /^#1 first prompt/ })).toBeDefined()
   expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeUndefined()
+  // No event says the ring left the band, so the card gives way in time.
+  await clock.advance(4000)
+  expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeDefined()
   // Another plugin's element in the band moves it.
   await focus('survey', 'yes')
   expect(moves).toEqual(['jump-0', 'yes'])

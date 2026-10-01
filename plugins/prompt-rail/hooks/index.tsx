@@ -59,6 +59,9 @@ const NOT_DRAWN = /nothing drawn/
 // also draws every transcript row this module hooks, and rows drawn again
 // while the person scrolls just after a jump move the viewport a turn away.
 const MOVED = { plugin: 'prompt-rail', key: 'moved' } as const
+// How long the band's text line shows the card of the bar the focus ring is
+// on after the ring last moved: no event says the ring left the band.
+const RING_CARD_MS = 4000
 const USAGE = '[off|vertical|horizontal|next|prev|first|last|<n>|find <words>]'
 // Commands that step through the prompts, each with the way it steps.
 const STEP_COMMANDS = [
@@ -924,8 +927,15 @@ export const register: Register = (on, options) => {
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
   let railColumns = 0
-  // The horizontal bar the band's focus ring is on, while it holds the keys.
-  let focused: number | undefined
+  // The horizontal bar whose card the text line shows, while the ring is on
+  // it, and the timer that stops showing it.
+  let ringed: number | undefined
+  let ringFade: Timer | undefined
+  const unring = () => {
+    ringFade?.cancel()
+    ringFade = undefined
+    ringed = undefined
+  }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -989,6 +999,7 @@ export const register: Register = (on, options) => {
     const isStep = STEP_COMMANDS.some(([name]) => name === e.command)
     if (!isStep && e.command !== 'prompt-rail') return next(e)
     const asked = isStep ? '' : e.args.trim()
+    unring()
     const index = askedIndex(e.command, asked)
     if (index !== undefined) {
       // The main conversation's rows are not drawn beside a subagent's, so a
@@ -1150,7 +1161,7 @@ export const register: Register = (on, options) => {
   // A prompt was sent: typed, or delivered from Remote Control. Its rows drawn
   // before the stored one are pending (see listDrawn).
   on('prompt.submit', async ($, e, next) => {
-    focused = undefined
+    unring()
     if (PROMPT_KINDS.has(e.origin.kind) && noteSent(e.text.replace(VIEW_CONTEXT, '').trim())) await redrawRail($)
     return next(e)
   })
@@ -1301,14 +1312,14 @@ export const register: Register = (on, options) => {
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
       const current = currentIndex()
       drawnCurrent = current
-      const ringed = focused !== undefined && focused < entries.length ? focused : undefined
-      // More prompts than cells: a window of bars centered on the ringed bar,
-      // else the prompt being read (the newest when none is known), `‹` and
-      // `›` marking what it hides.
+      const shownRing = ringed !== undefined && ringed < entries.length ? ringed : undefined
+      // More prompts than cells: a window of bars centered on the prompt being
+      // read (the newest when none is known), `‹` and `›` marking what it hides.
+      // It stays put while the ring moves: the ring keeps its place in the row,
+      // not its bar, so a shifted window would move it to another prompt.
       const isOverflowing = entries.length > width
       const capacity = isOverflowing ? width - 2 : entries.length
-      const read = current >= 0 ? current : entries.length - 1
-      const center = ringed ?? read
+      const center = current >= 0 ? current : entries.length - 1
       const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
       const shown = entries.slice(first, first + capacity)
       const hidesAfter = first + capacity < entries.length
@@ -1322,7 +1333,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
           <Box height={1} width={width}>
             {/* With no prompt known on screen, the newest: an empty line reads as a broken rail. */}
-            {ringed === undefined ? <Text dimColor wrap="truncate-end">{label(center)}</Text> : <Text wrap="truncate-end">{padTo(card(ringed), width)}</Text>}
+            {shownRing === undefined ? <Text dimColor wrap="truncate-end">{label(center)}</Text> : <Text wrap="truncate-end">{padTo(card(shownRing), width)}</Text>}
             {entries.map((_, i) => (
               <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
                 <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
@@ -1340,7 +1351,7 @@ export const register: Register = (on, options) => {
                   dimColor={i !== current}
                   label={bar(i === current, isUnreachable(i))}
                   hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
-                  autoFocus={i === read || undefined}
+                  autoFocus={i === center || undefined}
                   onPress={() => {}}
                 />
               )
@@ -1358,17 +1369,21 @@ export const register: Register = (on, options) => {
   })
 
   // The band holds the keyboard after a click or ctrl+x tab: the ring starts
-  // on the bar of the prompt being read, the arrows move it, Enter jumps. The
-  // text line shows the ringed prompt's card while the ring is on a bar.
+  // on the bar of the prompt being read, the arrows move it, Enter jumps. A
+  // scroll is refused here (it is no press), so the text line shows the
+  // ringed prompt's card instead, for RING_CARD_MS after each move.
   on('ui.focus', { component: 'AbovePrompt', plugin: 'prompt-rail' }, async ($, e, next) => {
     if (mode !== 'horizontal') return next(e)
     const result = await next(e)
-    const ringed = /^jump-(\d+)/.exec(e.element ?? '')?.[1]
-    const index = ringed === undefined ? undefined : Number(ringed)
-    if (!result.deny && index !== focused) {
-      focused = index
-      await redrawRail($)
-    }
+    const index = Number(/^jump-(\d+)/.exec(e.element ?? '')?.[1])
+    if (result.deny || !Number.isInteger(index)) return result
+    unring()
+    ringed = index
+    ringFade = $.clock.after(RING_CARD_MS, () => {
+      unring()
+      void redrawRail($)
+    })
+    await redrawRail($)
     return result
   })
 
@@ -1384,7 +1399,7 @@ export const register: Register = (on, options) => {
   // Scroll from the press dispatch itself (a click).
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
-    focused = undefined
+    unring()
     const entry = entries[index]
     const target = entry && drawnRow(drawn, entry.id)
     if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {

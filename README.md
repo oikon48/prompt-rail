@@ -76,7 +76,7 @@ Bind the step commands in `~/.claude/keybindings.json`; they run mid-turn too:
 }
 ```
 
-In the horizontal layout, `ctrl+x tab` moves the focus to the bars: the ring starts on the prompt you are reading, `←` `→` move it and show its prompt, `Enter` jumps there, `Esc` returns to the prompt input.
+In the horizontal layout, `ctrl+x tab` moves the focus to the bars: the ring starts on the prompt you are reading, `←` `→` move it across the bars on screen and show its prompt, `Enter` jumps there, `Esc` returns to the prompt input.
 
 ## Tick legend
 
