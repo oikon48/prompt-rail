@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, drawnRow, noteScroll, rowKey, stepFrom, tick, turnLine } from './index.tsx'
+import { bar, drawnRow, noteScroll, pickPrompt, rowKey, stepFrom, tick, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -130,7 +130,7 @@ test('with no prompt on screen the text line shows the newest one and no bar is 
   expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '│'])
 })
 
-test('the horizontal band keeps the focus ring off its bars', async ($, on) => {
+test('the horizontal band rings its bars, starting on the one being read, and shows the ringed card', async ($, on) => {
   const moves: (string | undefined)[] = []
   // Stand in for the engine moving the ring.
   on('ui.focus', ($: any, e: any) => {
@@ -138,17 +138,29 @@ test('the horizontal band keeps the focus ring off its bars', async ($, on) => {
     return {}
   })
   await drawPrompts($, on)
-  const focus = (component: 'AbovePrompt' | 'Pane', plugin: string, element: string) =>
-    $.ui.focus({ component, requestId: component === 'Pane' ? 'prompt-rail' : 'above-prompt', plugin, element, origin: { kind: 'person' } })
+  const focus = (plugin: string, element: string) =>
+    $.ui.focus({ component: 'AbovePrompt', requestId: 'above-prompt', plugin, element, origin: { kind: 'person' } })
   await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
-  // A lit bar left behind after a click reads as a stuck hover, so the ring
-  // stays where it was; a press still jumps.
-  expect((await focus('AbovePrompt', 'prompt-rail', 'jump-0')).deny).toBeDefined()
-  expect((await focus('AbovePrompt', 'prompt-rail', 'jump-1')).deny).toBeDefined()
-  expect(moves).toEqual([])
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  // The ring starts on the bar of the prompt being read.
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.autoFocus)).toEqual([undefined, true])
+  expect((await focus('prompt-rail', 'jump-0')).deny).toBeUndefined()
+  expect(moves).toEqual(['jump-0'])
+  // The text line follows the ring, not the prompt being read.
+  expect(await band.find({ type: 'Text', text: /^#1 first prompt/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^#2 second prompt$/ })).toBeUndefined()
   // Another plugin's element in the band moves it.
-  await focus('AbovePrompt', 'survey', 'yes')
-  expect(moves).toEqual(['yes'])
+  await focus('survey', 'yes')
+  expect(moves).toEqual(['jump-0', 'yes'])
+})
+
+test('a command names a prompt by number, first, last or the words it holds', () => {
+  const texts = ['fix the build', 'add tests', 'Fix the docs']
+  expect([pickPrompt('2', texts), pickPrompt('#3', texts), pickPrompt('4', texts), pickPrompt('0', texts)]).toEqual([1, 2, -1, -1])
+  expect([pickPrompt('first', texts), pickPrompt('last', texts), pickPrompt('last', [])]).toEqual([0, 2, -1])
+  // The newest that holds the words, case aside.
+  expect([pickPrompt('find fix the', texts), pickPrompt('find nothing', texts)]).toEqual([2, -1])
+  expect([pickPrompt('vertical', texts), pickPrompt('', texts), pickPrompt('find', texts)]).toEqual([undefined, undefined, undefined])
 })
 
 test('the vertical pane keeps the focus ring off its rows, the engine\'s own stops aside', async ($, on) => {
@@ -1113,7 +1125,12 @@ test('/prompt-rail runs mid-turn and takes next and prev', async ($, on) => {
   const disk = beneath()
   world(on, {}, TRANSCRIPT, disk)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
-  expect(disk.commands).toEqual([expect.objectContaining({ name: 'prompt-rail', immediate: true, argumentHint: '[off|vertical|horizontal|next|prev]' })])
+  expect(disk.commands).toEqual([
+    expect.objectContaining({ name: 'prompt-rail', immediate: true, argumentHint: '[off|vertical|horizontal|next|prev|first|last|<n>|find <words>]' }),
+    // Argument-free, for a keybinding to name.
+    expect.objectContaining({ name: 'prompt-rail-next', immediate: true }),
+    expect.objectContaining({ name: 'prompt-rail-prev', immediate: true }),
+  ])
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await $.command.run({ command: 'prompt-rail', args: 'next' })
   await $.command.run({ command: 'prompt-rail', args: 'prev' })
@@ -1299,7 +1316,7 @@ test('next and prev wait while a subagent transcript is in view', async ($, on) 
   const sub = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: { ...pane('dock', 40), view: { agentId: 'ag1' } } })
   await $.command.run({ command: 'prompt-rail', args: 'next' })
   // No jump is tried there, so no refusal can dot a main-conversation prompt.
-  expect(disk.toasts).toEqual(['prompt-rail: next and prev move through the main conversation; switch back to it first'])
+  expect(disk.toasts).toEqual(['prompt-rail: jumps move through the main conversation; switch back to it first'])
   await sub.unmount()
   expect((await railLabels($)).length).toBe(4)
   const main = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
