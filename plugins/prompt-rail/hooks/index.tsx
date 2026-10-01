@@ -852,7 +852,7 @@ export const register: Register = (on, options) => {
     return i >= 0 && [...onScreen.values()].some(row => indexOfRow(row.key, promptIndex) === i)
   }
   // A row of a prompt that was not in view as the jump landed: the person
-  // scrolled, or a new prompt came, so the top row says who is read again.
+  // scrolled, so the top row says who is read again.
   const noteLandedRow = (key: string) => {
     if (!landed) return
     const i = indexOfRow(key, promptIndexes())
@@ -1146,6 +1146,8 @@ export const register: Register = (on, options) => {
   // prompt's turn is running.
   on('turn.start', async ($, e, next) => {
     isRunning = true
+    // The transcript follows the new turn down from the prompt jumped to.
+    landed = undefined
     isContinuation = e.text.trim() === ''
     turnText = e.text.replace(VIEW_CONTEXT, '').trim()
     starter = undefined
