@@ -687,6 +687,11 @@ export const register: Register = (on, options) => {
   // reports to settle.
   let drawnCurrent = -1
   const settle: Settle = {}
+  // The prompt a jump landed on, read while the rows that came into view as it
+  // landed are all that show: one near the end cannot reach the viewport's
+  // top, so rows of earlier prompts stay above it. `shown` holds those rows'
+  // prompts; `isSettled` once they had SETTLE_MAX_MS to report.
+  let landed: { key: string; shown: Set<number>; isSettled: boolean } | undefined
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
   const seen: Seen = unseen()
@@ -817,10 +822,12 @@ export const register: Register = (on, options) => {
     const name = `${component}\u0000${id}`
     if (place === null) {
       onScreen.delete(name)
+      if (landed && !isLandedShown()) landed = undefined
       return undefined
     }
     const row = { name, key: rowKey(id), first: place.first, order: ++reports }
     onScreen.set(name, row)
+    noteLandedRow(row.key)
     return row.first > 0 ? row : undefined
   }
 
@@ -837,6 +844,22 @@ export const register: Register = (on, options) => {
     return promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
   }
   const promptIndexes = () => new Map(entries.map((entry, i) => [rowKey(entry.id), i]))
+
+  const landedIndex = () => (landed ? entries.findIndex(entry => rowKey(entry.id) === landed?.key) : -1)
+  const isLandedShown = () => {
+    const i = landedIndex()
+    const promptIndex = promptIndexes()
+    return i >= 0 && [...onScreen.values()].some(row => indexOfRow(row.key, promptIndex) === i)
+  }
+  // A row of a prompt that was not in view as the jump landed: the person
+  // scrolled, or a new prompt came, so the top row says who is read again.
+  const noteLandedRow = (key: string) => {
+    if (!landed) return
+    const i = indexOfRow(key, promptIndexes())
+    if (i === undefined) return
+    if (!landed.isSettled) landed.shown.add(i)
+    else if (!landed.shown.has(i)) landed = undefined
+  }
 
   // The prompt of the row that last said it is cut at the viewport's top: that
   // row is the top one, so a row of an earlier prompt still listed left
@@ -876,6 +899,12 @@ export const register: Register = (on, options) => {
   // Where the person is reading: the prompt that the topmost row on screen
   // belongs to. Kept while no known row shows.
   const currentIndex = () => {
+    const jumped = landedIndex()
+    if (jumped >= 0) {
+      reading = landed?.key
+      return jumped
+    }
+    landed = undefined
     const promptIndex = promptIndexes()
     // Rows above the top one are read past until it is confirmed (see dropAbove).
     const top = topIndex(promptIndex)
@@ -899,11 +928,14 @@ export const register: Register = (on, options) => {
   // After a jump lands, the rows before it left and the prompt jumped to is
   // at the top, though rows may not say so: a row that stays whole is silent,
   // and one that unmounts may never report it left.
-  const landOn = (id: string, target: string) => {
+  const landOn = (id: string, target: string, index: number) => {
     onScreen.clear()
     const name = `UserMessage\u0000${target}`
     onScreen.set(name, { name, key: rowKey(target), first: 0, order: ++reports })
     reading = rowKey(id)
+    const jump = { key: rowKey(id), shown: new Set([index]), isSettled: false }
+    landed = jump
+    return jump
   }
 
   // Whether the transcript read knows a drawn row, as a prompt or a reply.
@@ -915,7 +947,10 @@ export const register: Register = (on, options) => {
   // The rail's sites say whose transcript is in view; the rows a switch
   // leaves were another transcript's, and those it brings report anew.
   const noteView = (agentId: string | undefined) => {
-    if (agentId !== viewAgent) onScreen.clear()
+    if (agentId !== viewAgent) {
+      onScreen.clear()
+      landed = undefined
+    }
     viewAgent = agentId
   }
 
@@ -1011,7 +1046,10 @@ export const register: Register = (on, options) => {
       const entry = entries[index]
       const target = entry && drawnRow(drawn, entry.id)
       if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
-        landOn(entry.id, target)
+        const jump = landOn(entry.id, target, index)
+        $.clock.after(SETTLE_MAX_MS, () => {
+          jump.isSettled = true
+        })
         if (isDrawnStale()) await redrawRail($)
       }
       if (!entry) $.ui.toast(`prompt-rail: ${missingFor(e.command, asked)}`)
@@ -1068,6 +1106,7 @@ export const register: Register = (on, options) => {
       ended.clear()
       isRunning = false
       onScreen.clear()
+      landed = undefined
       reading = undefined
       drawnCurrent = -1
       unreachable.clear()
@@ -1403,7 +1442,10 @@ export const register: Register = (on, options) => {
     const entry = entries[index]
     const target = entry && drawnRow(drawn, entry.id)
     if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
-      landOn(entry.id, target)
+      const jump = landOn(entry.id, target, index)
+      $.clock.after(SETTLE_MAX_MS, () => {
+        jump.isSettled = true
+      })
       if (isDrawnStale()) await redrawRail($)
     }
     return next(e)
