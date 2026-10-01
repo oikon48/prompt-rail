@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - Added `/prompt-rail-next` and `/prompt-rail-prev`, which take no argument, so a keybinding (`command:prompt-rail-next`) can step through the prompts, mid-turn too
 - Added `/prompt-rail <n>` (or `#<n>`), `first`, `last` and `find <words>` to jump to a prompt by its number, to the oldest or newest, or to the newest prompt that holds the words
