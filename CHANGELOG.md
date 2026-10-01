@@ -5,6 +5,7 @@
 - Added `/prompt-rail-next` and `/prompt-rail-prev`, which take no argument, so a keybinding (`command:prompt-rail-next`) can step through the prompts, mid-turn too
 - Added `/prompt-rail <n>` (or `#<n>`), `first`, `last` and `find <words>` to jump to a prompt by its number, to the oldest or newest, or to the newest prompt that holds the words
 - Added keyboard selection to the horizontal rail: `ctrl+x tab` rings the bar of the prompt being read, `←` `→` move the ring across the bars on screen and show its prompt for a few seconds, `Enter` jumps there, `Esc` returns to the prompt input
+- Fixed a jump to one of the last prompts marking an earlier one as read: when its turn is too short to scroll to the top, the rail now stays on the prompt jumped to until you scroll or a new turn starts
 
 ## 0.6.1
 
