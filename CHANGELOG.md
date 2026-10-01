@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added `/prompt-rail-next` and `/prompt-rail-prev`, which take no argument, so a keybinding (`command:prompt-rail-next`) can step through the prompts, mid-turn too
+- Added `/prompt-rail <n>` (or `#<n>`), `first`, `last` and `find <words>` to jump to a prompt by its number, to the oldest or newest, or to the newest prompt that holds the words
+- Added keyboard selection to the horizontal rail: `ctrl+x tab` rings the bar of the prompt being read, `←` `→` move the ring across the bars on screen and show its prompt for a few seconds, `Enter` jumps there, `Esc` returns to the prompt input
+- Fixed a jump to one of the last prompts marking an earlier one as read: when its turn is too short to scroll to the top, the rail now stays on the prompt jumped to until you scroll or a new turn starts
+
 ## 0.6.1
 
 - Fixed the heavy bar jumping for a moment to a later prompt, the newest while a turn runs, as the transcript scrolled: a row that stays whole in the viewport does not report while others scroll past it, so the rail lost the row at the top; it now keeps each row until it reports that it left, and places the reader after a jump it makes, whatever rows left without saying so

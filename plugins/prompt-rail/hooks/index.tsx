@@ -59,6 +59,15 @@ const NOT_DRAWN = /nothing drawn/
 // also draws every transcript row this module hooks, and rows drawn again
 // while the person scrolls just after a jump move the viewport a turn away.
 const MOVED = { plugin: 'prompt-rail', key: 'moved' } as const
+// How long the band's text line shows the card of the bar the focus ring is
+// on after the ring last moved: no event says the ring left the band.
+const RING_CARD_MS = 4000
+const USAGE = '[off|vertical|horizontal|next|prev|first|last|<n>|find <words>]'
+// Commands that step through the prompts, each with the way it steps.
+const STEP_COMMANDS = [
+  ['prompt-rail-next', 'next'],
+  ['prompt-rail-prev', 'previous'],
+] as const
 
 // vertical: ticks in a docked pane; horizontal: ticks in a row above the
 // prompt; off: no rail at all. One setting, so /config keeps a single row.
@@ -135,6 +144,23 @@ export const noteScroll = (unreachable: Set<string>, id: string, deny: string | 
 export const stepFrom = (current: number, count: number, dir: 1 | -1, isSkipped: (i: number) => boolean) => {
   let i = current >= 0 ? current + dir : dir > 0 ? 0 : count - 1
   for (; i >= 0 && i < count; i += dir) if (!isSkipped(i)) return i
+  return -1
+}
+
+// The prompt `/prompt-rail <asked>` names among `texts`: `n` or `#n` by its
+// number, `first`, `last`, or with `find <words>` the newest whose text holds
+// them (case aside). -1 when none does; undefined when `asked` names none.
+export const pickPrompt = (asked: string, texts: string[]) => {
+  const number = /^#?(\d+)$/.exec(asked)
+  if (number) {
+    const i = Number(number[1]) - 1
+    return i < texts.length ? i : -1
+  }
+  if (asked === 'first') return texts.length > 0 ? 0 : -1
+  if (asked === 'last') return texts.length - 1
+  const words = /^find\s+(.+)$/.exec(asked)?.[1]?.toLowerCase()
+  if (words === undefined) return undefined
+  for (let i = texts.length - 1; i >= 0; i--) if (texts[i]?.toLowerCase().includes(words)) return i
   return -1
 }
 
@@ -661,6 +687,11 @@ export const register: Register = (on, options) => {
   // reports to settle.
   let drawnCurrent = -1
   const settle: Settle = {}
+  // The prompt a jump landed on, read while the rows that came into view as it
+  // landed are all that show: one near the end cannot reach the viewport's
+  // top, so rows of earlier prompts stay above it. `shown` holds those rows'
+  // prompts; `isSettled` once they had SETTLE_MAX_MS to report.
+  let landed: { key: string; shown: Set<number>; isSettled: boolean } | undefined
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
   const seen: Seen = unseen()
@@ -791,10 +822,12 @@ export const register: Register = (on, options) => {
     const name = `${component}\u0000${id}`
     if (place === null) {
       onScreen.delete(name)
+      if (landed && !isLandedShown()) landed = undefined
       return undefined
     }
     const row = { name, key: rowKey(id), first: place.first, order: ++reports }
     onScreen.set(name, row)
+    noteLandedRow(row.key)
     return row.first > 0 ? row : undefined
   }
 
@@ -811,6 +844,22 @@ export const register: Register = (on, options) => {
     return promptIndex.get(id) ?? (ownerId === undefined ? entries.length - 1 : promptIndex.get(ownerId))
   }
   const promptIndexes = () => new Map(entries.map((entry, i) => [rowKey(entry.id), i]))
+
+  const landedIndex = () => (landed ? entries.findIndex(entry => rowKey(entry.id) === landed?.key) : -1)
+  const isLandedShown = () => {
+    const i = landedIndex()
+    const promptIndex = promptIndexes()
+    return i >= 0 && [...onScreen.values()].some(row => indexOfRow(row.key, promptIndex) === i)
+  }
+  // A row of a prompt that was not in view as the jump landed: the person
+  // scrolled, so the top row says who is read again.
+  const noteLandedRow = (key: string) => {
+    if (!landed) return
+    const i = indexOfRow(key, promptIndexes())
+    if (i === undefined) return
+    if (!landed.isSettled) landed.shown.add(i)
+    else if (!landed.shown.has(i)) landed = undefined
+  }
 
   // The prompt of the row that last said it is cut at the viewport's top: that
   // row is the top one, so a row of an earlier prompt still listed left
@@ -850,6 +899,12 @@ export const register: Register = (on, options) => {
   // Where the person is reading: the prompt that the topmost row on screen
   // belongs to. Kept while no known row shows.
   const currentIndex = () => {
+    const jumped = landedIndex()
+    if (jumped >= 0) {
+      reading = landed?.key
+      return jumped
+    }
+    landed = undefined
     const promptIndex = promptIndexes()
     // Rows above the top one are read past until it is confirmed (see dropAbove).
     const top = topIndex(promptIndex)
@@ -873,11 +928,14 @@ export const register: Register = (on, options) => {
   // After a jump lands, the rows before it left and the prompt jumped to is
   // at the top, though rows may not say so: a row that stays whole is silent,
   // and one that unmounts may never report it left.
-  const landOn = (id: string, target: string) => {
+  const landOn = (id: string, target: string, index: number) => {
     onScreen.clear()
     const name = `UserMessage\u0000${target}`
     onScreen.set(name, { name, key: rowKey(target), first: 0, order: ++reports })
     reading = rowKey(id)
+    const jump = { key: rowKey(id), shown: new Set([index]), isSettled: false }
+    landed = jump
+    return jump
   }
 
   // Whether the transcript read knows a drawn row, as a prompt or a reply.
@@ -889,7 +947,10 @@ export const register: Register = (on, options) => {
   // The rail's sites say whose transcript is in view; the rows a switch
   // leaves were another transcript's, and those it brings report anew.
   const noteView = (agentId: string | undefined) => {
-    if (agentId !== viewAgent) onScreen.clear()
+    if (agentId !== viewAgent) {
+      onScreen.clear()
+      landed = undefined
+    }
     viewAgent = agentId
   }
 
@@ -901,6 +962,15 @@ export const register: Register = (on, options) => {
   // Only the terminal draws the band; elsewhere the pane is the one site.
   let isTerminal = false
   let railColumns = 0
+  // The horizontal bar whose card the text line shows, while the ring is on
+  // it, and the timer that stops showing it.
+  let ringed: number | undefined
+  let ringFade: Timer | undefined
+  const unring = () => {
+    ringFade?.cancel()
+    ringFade = undefined
+    ringed = undefined
+  }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -908,11 +978,16 @@ export const register: Register = (on, options) => {
       // every other plugin's and the built-ins, so a generic name would collide.
       name: 'prompt-rail',
       description:
-        'Show the prompt rail: vertical (a pane beside the transcript), horizontal (above the prompt) or off; next or prev jumps to the next or previous prompt.',
-      argumentHint: '[off|vertical|horizontal|next|prev]',
+        'Show the prompt rail: vertical (a pane beside the transcript), horizontal (above the prompt) or off; next, prev, first, last, a number or find <words> jumps to a prompt.',
+      argumentHint: USAGE,
       // Runs while a turn streams, so next and prev move through it then too.
       immediate: true,
     })
+    // Argument-free, so a keybinding can name them (`command:prompt-rail-next`):
+    // a binding runs a command bare.
+    for (const [name, way] of STEP_COMMANDS) {
+      await $.command.register({ name, description: `Jump to the ${way} prompt in the prompt rail.`, immediate: true })
+    }
     isTerminal = e.surface === 'terminal'
     // Move a mode an earlier version stored into the setting, once. Writing
     // the setting reloads this module, so everything after it is best effort.
@@ -939,26 +1014,49 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'prompt-rail' }, async ($, e) => {
-    const asked = e.args.trim()
-    if (asked === 'next' || asked === 'prev') {
+  // The prompt a command asks for: its index among the entries, or why none
+  // (undefined when the command asks for no prompt).
+  const askedIndex = (command: string, asked: string): number | undefined => {
+    const way = STEP_COMMANDS.find(([name]) => name === command)?.[1]
+    if (way !== undefined || asked === 'next' || asked === 'prev') {
+      const dir = way === 'next' || asked === 'next' ? 1 : -1
+      return stepFrom(currentIndex(), entries.length, dir, isUnreachable)
+    }
+    return pickPrompt(asked, entries.map(entry => entry.text))
+  }
+  const missingFor = (command: string, asked: string) => {
+    if (command === 'prompt-rail-next' || asked === 'next') return 'no later prompt'
+    if (command === 'prompt-rail-prev' || asked === 'prev') return 'no earlier prompt'
+    return `no prompt ${asked}`
+  }
+
+  on('command.run', async ($, e, next) => {
+    const isStep = STEP_COMMANDS.some(([name]) => name === e.command)
+    if (!isStep && e.command !== 'prompt-rail') return next(e)
+    const asked = isStep ? '' : e.args.trim()
+    unring()
+    const index = askedIndex(e.command, asked)
+    if (index !== undefined) {
       // The main conversation's rows are not drawn beside a subagent's, so a
       // jump would be refused and wrongly dot a prompt that can be reached.
       if (viewAgent !== undefined) {
-        $.ui.toast('prompt-rail: next and prev move through the main conversation; switch back to it first')
+        $.ui.toast('prompt-rail: jumps move through the main conversation; switch back to it first')
         return {}
       }
-      const entry = entries[stepFrom(currentIndex(), entries.length, asked === 'next' ? 1 : -1, isUnreachable)]
+      const entry = entries[index]
       const target = entry && drawnRow(drawn, entry.id)
       if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
-        landOn(entry.id, target)
+        const jump = landOn(entry.id, target, index)
+        $.clock.after(SETTLE_MAX_MS, () => {
+          jump.isSettled = true
+        })
         if (isDrawnStale()) await redrawRail($)
       }
-      if (!entry) $.ui.toast(`prompt-rail: no ${asked === 'next' ? 'later' : 'earlier'} prompt`)
+      if (!entry) $.ui.toast(`prompt-rail: ${missingFor(e.command, asked)}`)
       return {}
     }
     if (asked && !isMode(asked)) {
-      $.ui.toast('prompt-rail: /prompt-rail [off|vertical|horizontal|next|prev]')
+      $.ui.toast(`prompt-rail: /prompt-rail ${USAGE}`)
       return {}
     }
     // Reopening a rail that is off would only close it again: say how to turn it on.
@@ -1008,6 +1106,7 @@ export const register: Register = (on, options) => {
       ended.clear()
       isRunning = false
       onScreen.clear()
+      landed = undefined
       reading = undefined
       drawnCurrent = -1
       unreachable.clear()
@@ -1047,6 +1146,8 @@ export const register: Register = (on, options) => {
   // prompt's turn is running.
   on('turn.start', async ($, e, next) => {
     isRunning = true
+    // The transcript follows the new turn down from the prompt jumped to.
+    landed = undefined
     isContinuation = e.text.trim() === ''
     turnText = e.text.replace(VIEW_CONTEXT, '').trim()
     starter = undefined
@@ -1101,6 +1202,7 @@ export const register: Register = (on, options) => {
   // A prompt was sent: typed, or delivered from Remote Control. Its rows drawn
   // before the stored one are pending (see listDrawn).
   on('prompt.submit', async ($, e, next) => {
+    unring()
     if (PROMPT_KINDS.has(e.origin.kind) && noteSent(e.text.replace(VIEW_CONTEXT, '').trim())) await redrawRail($)
     return next(e)
   })
@@ -1251,8 +1353,11 @@ export const register: Register = (on, options) => {
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
       const current = currentIndex()
       drawnCurrent = current
+      const shownRing = ringed !== undefined && ringed < entries.length ? ringed : undefined
       // More prompts than cells: a window of bars centered on the prompt being
       // read (the newest when none is known), `‹` and `›` marking what it hides.
+      // It stays put while the ring moves: the ring keeps its place in the row,
+      // not its bar, so a shifted window would move it to another prompt.
       const isOverflowing = entries.length > width
       const capacity = isOverflowing ? width - 2 : entries.length
       const center = current >= 0 ? current : entries.length - 1
@@ -1269,7 +1374,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
           <Box height={1} width={width}>
             {/* With no prompt known on screen, the newest: an empty line reads as a broken rail. */}
-            <Text dimColor wrap="truncate-end">{label(center)}</Text>
+            {shownRing === undefined ? <Text dimColor wrap="truncate-end">{label(center)}</Text> : <Text wrap="truncate-end">{padTo(card(shownRing), width)}</Text>}
             {entries.map((_, i) => (
               <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
                 <Text wrap="truncate-end">{padTo(card(i), width)}</Text>
@@ -1287,6 +1392,7 @@ export const register: Register = (on, options) => {
                   dimColor={i !== current}
                   label={bar(i === current, isUnreachable(i))}
                   hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
+                  autoFocus={i === center || undefined}
                   onPress={() => {}}
                 />
               )
@@ -1303,13 +1409,23 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // The band holds the keyboard after a click or ctrl+x tab, and a ring on a
-  // bar stays lit until Escape, which reads as a hover that will not clear.
-  // Keep the ring off the horizontal rail's bars; a click still presses, and
-  // /prompt-rail next and prev are its keyboard route.
+  // The band holds the keyboard after a click or ctrl+x tab: the ring starts
+  // on the bar of the prompt being read, the arrows move it, Enter jumps. A
+  // scroll is refused here (it is no press), so the text line shows the
+  // ringed prompt's card instead, for RING_CARD_MS after each move.
   on('ui.focus', { component: 'AbovePrompt', plugin: 'prompt-rail' }, async ($, e, next) => {
-    if (mode === 'horizontal') return { deny: 'prompt-rail: the rail takes clicks, not the focus ring' }
-    return next(e)
+    if (mode !== 'horizontal') return next(e)
+    const result = await next(e)
+    const index = Number(/^jump-(\d+)/.exec(e.element ?? '')?.[1])
+    if (result.deny || !Number.isInteger(index)) return result
+    unring()
+    ringed = index
+    ringFade = $.clock.after(RING_CARD_MS, () => {
+      unring()
+      void redrawRail($)
+    })
+    await redrawRail($)
+    return result
   })
 
   // In the pane, a ringed row and the row under the pointer light at once and
@@ -1324,10 +1440,14 @@ export const register: Register = (on, options) => {
   // Scroll from the press dispatch itself (a click).
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
     const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
+    unring()
     const entry = entries[index]
     const target = entry && drawnRow(drawn, entry.id)
     if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
-      landOn(entry.id, target)
+      const jump = landOn(entry.id, target, index)
+      $.clock.after(SETTLE_MAX_MS, () => {
+        jump.isSettled = true
+      })
       if (isDrawnStale()) await redrawRail($)
     }
     return next(e)

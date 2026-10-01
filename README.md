@@ -56,9 +56,27 @@ Mouse works best with `"tui": "fullscreen"`.
 | `/prompt-rail off` | Hide the rail |
 | `/prompt-rail next` | Jump to the next prompt |
 | `/prompt-rail prev` | Jump to the previous prompt |
+| `/prompt-rail first`, `last` | Jump to the first or the newest prompt |
+| `/prompt-rail 12`, `#12` | Jump to prompt #12 |
+| `/prompt-rail find <words>` | Jump to the newest prompt that holds the words |
+| `/prompt-rail-next`, `/prompt-rail-prev` | Jump to the next or previous prompt, with no argument, for a keybinding |
 | `/prompt-rail` | Reopen the rail in the current layout |
 
 The layout is also the "Rail mode" row in `/config`, and it is kept across sessions.
+
+### Keyboard
+
+Bind the step commands in `~/.claude/keybindings.json`; they run mid-turn too:
+
+```json
+{
+  "bindings": [
+    { "context": "Chat", "bindings": { "ctrl+k": "command:prompt-rail-prev", "meta+j": "command:prompt-rail-next" } }
+  ]
+}
+```
+
+In the horizontal layout, `ctrl+x tab` moves the focus to the bars: the ring starts on the prompt you are reading, `←` `→` move it across the bars on screen and show its prompt, `Enter` jumps there, `Esc` returns to the prompt input.
 
 ## Tick legend
 
