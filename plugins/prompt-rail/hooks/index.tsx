@@ -54,6 +54,10 @@ const RAIL_INSET = 2
 // command's own row, which the transcript file holds but the surface skips.
 // Other refusals (a race with another move) pass, so they leave the tick be.
 const NOT_DRAWN = /nothing drawn/
+// The engine's refusal where no transcript viewport takes a plugin's scroll,
+// as in the desktop app; said once, in words of the rail's own.
+const UNSCROLLABLE = /not scrollable/
+const UNSCROLLABLE_TOAST = 'jumps cannot land here: this view does not let a plugin scroll the transcript'
 // A count the rail's sites (the pane and the band) read while drawing, so
 // bumping it draws them again, and them alone. `$.ui.invalidate('ui.render')`
 // also draws every transcript row this module hooks, and rows drawn again
@@ -137,6 +141,12 @@ export const noteScroll = (unreachable: Set<string>, id: string, deny: string | 
   else if (NOT_DRAWN.test(deny)) unreachable.add(id)
   return unreachable.has(id) !== was
 }
+
+// What a refused jump says: the engine's refusal as it words it, or, where
+// the view cannot scroll the transcript at all, words of the rail's own the
+// first time; undefined once those were said.
+export const jumpNotice = (deny: string, isUnscrollableSaid: boolean) =>
+  UNSCROLLABLE.test(deny) ? (isUnscrollableSaid ? undefined : UNSCROLLABLE_TOAST) : deny
 
 // The prompt one step from `current` in direction `dir`, passing over those
 // `isSkipped` names; from an unknown place (-1), the first or the last. -1
@@ -484,7 +494,7 @@ async function readLarge($: EngineInterface, path: string, seen: Seen, size: num
     if (seen.warned !== path) {
       seen.warned = path
       const megabytes = Math.round(size / 1024 / 1024)
-      $.ui.toast(`prompt-rail: the transcript is ${megabytes} MB, too large to read here (${(err as Error).message}); prompts are listed as they are drawn`)
+      $.ui.toast(`the transcript is ${megabytes} MB, too large to read here (${(err as Error).message}); prompts are listed as they are drawn`)
     }
     return undefined
   }
@@ -556,25 +566,30 @@ async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
 async function writeMode($: EngineInterface, mode: Mode) {
   try {
     const result = await $.config.set({ key: MODE_SETTING, value: mode })
-    if (result.deny) $.ui.toast(`prompt-rail: the mode was not saved: ${result.deny}`)
+    if (result.deny) $.ui.toast(`the mode was not saved: ${result.deny}`)
   } catch (err) {
     await $.store.set(`${SESSION_MODE_KEY_PREFIX}${await $.session.id()}`, mode)
-    $.ui.toast(`prompt-rail: ${mode} for this session; the mode was not saved: ${(err as Error).message}`)
+    $.ui.toast(`${mode} for this session; the mode was not saved: ${(err as Error).message}`)
   }
 }
 
 // Scroll the transcript to a prompt's row, drawn under `target`, from a
 // dispatch that answers the person's own input (a press, a typed command): a
 // transcript row moves only then. Records whether the prompt could be reached,
-// and returns whether the transcript scrolled to it.
-async function jumpTo($: EngineInterface, id: string, target: string, unreachable: Set<string>) {
+// and returns whether the transcript scrolled to it. Where the view cannot
+// scroll at all, says so once a session (`notices.isUnscrollableSaid`).
+async function jumpTo($: EngineInterface, id: string, target: string, unreachable: Set<string>, notices: { isUnscrollableSaid: boolean }) {
   try {
     const result = await $.ui.scroll({ to: { requestId: target }, block: 'start' })
-    if (result.deny) $.ui.toast(`prompt-rail: ${result.deny}`)
+    if (result.deny) {
+      const notice = jumpNotice(result.deny, notices.isUnscrollableSaid)
+      if (notice !== undefined) $.ui.toast(notice)
+      if (UNSCROLLABLE.test(result.deny)) notices.isUnscrollableSaid = true
+    }
     if (noteScroll(unreachable, id, result.deny)) await redrawRail($)
     return !result.deny
   } catch (err) {
-    $.ui.toast(`prompt-rail: ${(err as Error).message}`)
+    $.ui.toast((err as Error).message)
     return false
   }
 }
@@ -694,6 +709,8 @@ export const register: Register = (on, options) => {
   let landed: { key: string; shown: Set<number>; isSettled: boolean } | undefined
   // Prompts whose rows the surface does not draw, learnt from a refused jump.
   const unreachable = new Set<string>()
+  // Notices a session gives once (see jumpTo).
+  const notices = { isUnscrollableSaid: false }
   const seen: Seen = unseen()
   // Row key -> the id a prompt's row was last drawn under (see drawnRow).
   const drawn = new Map<string, string>()
@@ -959,7 +976,8 @@ export const register: Register = (on, options) => {
   // The subagent whose transcript is in view, as the rail's sites last drew;
   // undefined for the main conversation, whose rows alone the rail lists.
   let viewAgent: string | undefined
-  // Only the terminal draws the band; elsewhere the pane is the one site.
+  // Whether the session started on the terminal, whose band carries the
+  // horizontal rail alone; elsewhere the pane stays open beside it.
   let isTerminal = false
   let railColumns = 0
   // The horizontal bar whose card the text line shows, while the ring is on
@@ -1040,28 +1058,28 @@ export const register: Register = (on, options) => {
       // The main conversation's rows are not drawn beside a subagent's, so a
       // jump would be refused and wrongly dot a prompt that can be reached.
       if (viewAgent !== undefined) {
-        $.ui.toast('prompt-rail: jumps move through the main conversation; switch back to it first')
+        $.ui.toast('jumps move through the main conversation; switch back to it first')
         return {}
       }
       const entry = entries[index]
       const target = entry && drawnRow(drawn, entry.id)
-      if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
+      if (entry && target && (await jumpTo($, entry.id, target, unreachable, notices))) {
         const jump = landOn(entry.id, target, index)
         $.clock.after(SETTLE_MAX_MS, () => {
           jump.isSettled = true
         })
         if (isDrawnStale()) await redrawRail($)
       }
-      if (!entry) $.ui.toast(`prompt-rail: ${missingFor(e.command, asked)}`)
+      if (!entry) $.ui.toast(missingFor(e.command, asked))
       return {}
     }
     if (asked && !isMode(asked)) {
-      $.ui.toast(`prompt-rail: /prompt-rail ${USAGE}`)
+      $.ui.toast(`/prompt-rail ${USAGE}`)
       return {}
     }
     // Reopening a rail that is off would only close it again: say how to turn it on.
     if (!asked && mode === 'off') {
-      $.ui.toast('prompt-rail: the rail is off; /prompt-rail vertical or /prompt-rail horizontal turns it on')
+      $.ui.toast('the rail is off; /prompt-rail vertical or /prompt-rail horizontal turns it on')
       return {}
     }
     if (isMode(asked)) mode = asked
@@ -1110,6 +1128,7 @@ export const register: Register = (on, options) => {
       reading = undefined
       drawnCurrent = -1
       unreachable.clear()
+      notices.isUnscrollableSaid = false
       drawn.clear()
       filed = new Set()
       pending.clear()
@@ -1329,7 +1348,7 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // The band above the prompt (terminal only). Horizontal: the rail itself, a
+  // The band above the prompt. Horizontal: the rail itself, a
   // row of ticks with the hovered prompt beside them. Vertical with a dock too
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1350,10 +1369,18 @@ export const register: Register = (on, options) => {
       // Two rows: the text line, then the bars beside the prompt. The text line
       // shows the prompt being read, dim, and the hovered one's card painted
       // over it; the bar of the prompt being read is heavy.
+      //
+      // Only the terminal's grid of cells hides the dim line under a card. A
+      // page (the desktop app) paints a card with no background, in a face of
+      // its own widths, so the line beneath shows through: there the text line
+      // holds the hovered card alone, and the prompt being read is named after
+      // the bars. It draws its own ring on a bar, beside the hovered one, so
+      // the rail starts none there and shows no ringed card.
+      const isCellGrid = e.surface === 'terminal'
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
       const current = currentIndex()
       drawnCurrent = current
-      const shownRing = ringed !== undefined && ringed < entries.length ? ringed : undefined
+      const shownRing = isCellGrid && ringed !== undefined && ringed < entries.length ? ringed : undefined
       // More prompts than cells: a window of bars centered on the prompt being
       // read (the newest when none is known), `‹` and `›` marking what it hides.
       // It stays put while the ring moves: the ring keeps its place in the row,
@@ -1364,11 +1391,51 @@ export const register: Register = (on, options) => {
       const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
       const shown = entries.slice(first, first + capacity)
       const hidesAfter = first + capacity < entries.length
-      const label = (i: number) => `#${i + 1} ${oneLine(entries[i]?.text ?? '', width - `#${i + 1} `.length)}`
+      const label = (i: number, room = width) => `#${i + 1} ${oneLine(entries[i]?.text ?? '', room - `#${i + 1} `.length)}`
       // The hovered prompt's card also sums up its turn.
       const card = (i: number) => {
         const entry = entries[i]
         return entry ? `#${i + 1} ${withTurn(entry, width - `#${i + 1} `.length)}` : ''
+      }
+      const bars = [
+        isOverflowing ? <Text dimColor>{first > 0 ? '‹' : ' '}</Text> : null,
+        ...shown.map((entry, offset) => {
+          const i = first + offset
+          return (
+            <Button
+              key={`jump-${i}`}
+              plain
+              dimColor={i !== current}
+              label={bar(i === current, isUnreachable(i))}
+              hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
+              autoFocus={(isCellGrid && i === center) || undefined}
+              onPress={() => {}}
+            />
+          )
+        }),
+        hidesAfter ? <Text dimColor>›</Text> : null,
+      ]
+      if (!isCellGrid) {
+        // Each bar as wide as a cell, the marks and a gap beside them.
+        const room = Math.max(8, width - capacity - 3)
+        return (
+          <Box flexDirection="column" paddingLeft={RAIL_INSET}>
+            <Box height={1} width={width}>
+              {entries.map((_, i) => (
+                <Box key={`card-${i}`} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
+                  <Text wrap="truncate-end">{card(i)}</Text>
+                </Box>
+              ))}
+            </Box>
+            <Box flexDirection="row">
+              {bars}
+              {/* With no prompt known on screen, the newest: bars alone read as a broken rail. */}
+              <Box marginLeft={1}>
+                <Text dimColor wrap="truncate-end">{label(center, room)}</Text>
+              </Box>
+            </Box>
+          </Box>
+        )
       }
       return (
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
@@ -1381,24 +1448,7 @@ export const register: Register = (on, options) => {
               </Box>
             ))}
           </Box>
-          <Box flexDirection="row">
-            {isOverflowing ? <Text dimColor>{first > 0 ? '‹' : ' '}</Text> : null}
-            {shown.map((entry, offset) => {
-              const i = first + offset
-              return (
-                <Button
-                  key={`jump-${i}`}
-                  plain
-                  dimColor={i !== current}
-                  label={bar(i === current, isUnreachable(i))}
-                  hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
-                  autoFocus={i === center || undefined}
-                  onPress={() => {}}
-                />
-              )
-            })}
-            {hidesAfter ? <Text dimColor>›</Text> : null}
-          </Box>
+          <Box flexDirection="row">{bars}</Box>
         </Box>
       )
     }
@@ -1443,7 +1493,7 @@ export const register: Register = (on, options) => {
     unring()
     const entry = entries[index]
     const target = entry && drawnRow(drawn, entry.id)
-    if (entry && target && (await jumpTo($, entry.id, target, unreachable))) {
+    if (entry && target && (await jumpTo($, entry.id, target, unreachable, notices))) {
       const jump = landOn(entry.id, target, index)
       $.clock.after(SETTLE_MAX_MS, () => {
         jump.isSettled = true
