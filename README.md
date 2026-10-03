@@ -108,8 +108,8 @@ The rail lists the prompts of the live branch, so prompts abandoned with `/rewin
 <summary>Known limits</summary>
 
 - Function hooks are early access, and their API may change between Claude Code releases.
-- The hover card with the turn summary is part of the horizontal rail; the terminal alone draws it.
-- The Claude desktop app shows no rail. Checked with its bundled Claude Code 2.1.280, the engine reports the pane as placed, but the app never asks the plugin to draw it.
+- The hover card with the turn summary is part of the horizontal rail.
+- The Claude desktop app draws the horizontal rail and its hover cards, but a click cannot jump there. The app gives a plugin no way to scroll its transcript, so the rail says so once a session. The prompt being read is named beside the bars rather than on the line above them, since the app paints a card over that line without hiding what is under it. Checked with Claude Code 2.1.280, the app did not draw the vertical pane.
 - The dock width is shared by all plugin panes; drag its edge to narrow it, down to 24 columns.
 - A `/compact` command's own row cannot be jumped to; its tick turns dotted after the first try.
 - Near the end of the transcript, `next` cannot scroll further.

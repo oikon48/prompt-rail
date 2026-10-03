@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, drawnRow, noteScroll, pickPrompt, rowKey, stepFrom, tick, turnLine } from './index.tsx'
+import { bar, drawnRow, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, tick, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -156,6 +156,72 @@ test('the horizontal band rings its bars, starting on the one being read, and sh
   // Another plugin's element in the band moves it.
   await focus('survey', 'yes')
   expect(moves).toEqual(['jump-0', 'yes'])
+})
+
+// The desktop paints an absolutely placed card with no background of its own
+// and draws text in a proportional face, so a card laid over the line lets the
+// text beneath show through.
+const isDimLabel = (node: any, text: RegExp) => node.type === 'Text' && node.props?.dimColor === true && text.test(String(node.text))
+
+test('the desktop band reveals a hovered card on a line with nothing beneath it, and names the prompt being read beside the bars', async ($, on) => {
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+  const drawn = await band.findAll({})
+  expect(drawn.filter((node: any) => node.props?.position === 'absolute')).toEqual([])
+  expect((await band.find({ key: 'card-0' }))?.props.display).toBe('none')
+  expect((await band.find({ key: 'card-1' }))?.props.display).toBe('none')
+  const label = drawn.findIndex((node: any) => isDimLabel(node, /^#2 second prompt$/))
+  expect(label).toBeGreaterThan(drawn.findIndex((node: any) => node.type === 'Button'))
+  // The desktop rings a bar of its own accord beside the hovered one: no ring at rest.
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.autoFocus)).toEqual([undefined, undefined])
+  expect((await band.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['│', '┃'])
+})
+
+test('on the desktop a ringed bar paints no card over the line a hovered one reveals', async ($, on) => {
+  mock.clock(on)
+  on('ui.focus', () => ({}))
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+  await $.ui.focus({ component: 'AbovePrompt', requestId: 'above-prompt', plugin: 'prompt-rail', element: 'jump-0', origin: { kind: 'person' } })
+  // The hidden card of the first prompt alone holds its text.
+  expect((await band.findAll({ type: 'Text', text: /^#1 first prompt/ })).length).toBe(1)
+  expect((await band.findAll({})).some((node: any) => isDimLabel(node, /^#2 second prompt$/))).toBe(true)
+})
+
+test('on the desktop the band keeps the focus ring off its bars, so a clicked bar does not stay lit beside a hovered one', async ($, on) => {
+  mock.clock(on)
+  const moves: (string | undefined)[] = []
+  on('ui.focus', ($: any, e: any) => {
+    moves.push(e.element)
+    return {}
+  })
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+  const ringed = await $.ui.focus({ component: 'AbovePrompt', requestId: 'above-prompt', plugin: 'prompt-rail', element: 'jump-0', origin: { kind: 'person' } })
+  expect(ringed.deny).toBeDefined()
+  expect(moves).toEqual([])
+})
+
+test('on the desktop the bars leave room beside them for the prompt being read', async ($, on) => {
+  mock.clock(on)
+  await drawPrompts($, on)
+  for (let n = 3; n <= 25; n++) {
+    await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: `m${n}`, props: prompt(`prompt number ${n}`, null) })
+  }
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  const bodyColumns = 30
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'desktop', component: 'AbovePrompt', props: { ...BAND, bodyColumns } })
+  const drawn = await band.findAll({})
+  const bars = drawn.filter((node: any) => node.type === 'Button').length
+  const marks = drawn.filter((node: any) => node.type === 'Text' && (node.text === '‹' || node.text === '›' || node.text === ' ')).length
+  const label = drawn.find((node: any) => isDimLabel(node, /^#2 /))
+  expect(label).toBeDefined()
+  // The bars, their marks, a gap and the label fit the band's width, inset aside.
+  expect(bars + marks + 1 + [...String(label.text)].length).toBeLessThanOrEqual(bodyColumns - 2 - 2)
+  expect(String(label.text)).toMatch(/^#2 second/)
 })
 
 test('a command names a prompt by number, first, last or the words it holds', () => {
@@ -1320,13 +1386,25 @@ test('next and prev wait while a subagent transcript is in view', async ($, on) 
   const sub = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: { ...pane('dock', 40), view: { agentId: 'ag1' } } })
   await $.command.run({ command: 'prompt-rail', args: 'next' })
   // No jump is tried there, so no refusal can dot a main-conversation prompt.
-  expect(disk.toasts).toEqual(['prompt-rail: jumps move through the main conversation; switch back to it first'])
+  // The engine names the plugin ahead of each toast.
+  expect(disk.toasts).toEqual(['jumps move through the main conversation; switch back to it first'])
   await sub.unmount()
   expect((await railLabels($)).length).toBe(4)
   const main = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   await main.unmount()
   await $.command.run({ command: 'prompt-rail', args: 'prev' })
   expect(disk.toasts.filter(text => text.includes('switch back'))).toHaveLength(1)
+})
+
+test('a view that cannot scroll the transcript is said once, in plain words, and dots no prompt', () => {
+  // The engine's refusal where no transcript viewport is bound, as in the desktop app.
+  const UNSCROLLABLE = 'transcript not scrollable here'
+  expect(jumpNotice(UNSCROLLABLE, false)).toMatch(/^jumps cannot land here/)
+  expect(jumpNotice(UNSCROLLABLE, true)).toBeUndefined()
+  // Any other refusal is passed on as the engine words it, every time.
+  expect(jumpNotice(NOT_DRAWN, true)).toBe(NOT_DRAWN)
+  // It says nothing of whether the prompt's row is drawn.
+  expect(noteScroll(new Set<string>(), 'm1', UNSCROLLABLE)).toBe(false)
 })
 
 test('files that share a name are told apart by their folder', async ($, on) => {
