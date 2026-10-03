@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Fixed the horizontal rail in the Claude desktop app drawing a hovered prompt's card over the dim line of the prompt being read, so both texts showed at once; there the line above the bars now shows the hovered card alone, and the prompt being read is named beside the bars
-- Fixed the horizontal rail in the desktop app lighting two bars at once, the app's focus ring on one and the hover on another; the rail no longer starts a ring or shows a ringed card there
+- Fixed the horizontal rail in the Claude desktop app drawing a hovered prompt's card over the dim line of the prompt being read, so both texts showed at once; there the line above the bars now shows the hovered card alone, and the prompt being read is named beside the bars, with room kept for it however many bars there are
+- Fixed the horizontal rail in the desktop app lighting two bars at once, the app's focus ring on one and the hover on another; the bars there take clicks, not the focus ring
 - Changed a jump the desktop app cannot make to say once a session, in plain words, that jumps cannot land there, instead of the engine's "transcript not scrollable here" on every click
 - Fixed every toast starting with "prompt-rail: prompt-rail:", since the engine already names the plugin
 

@@ -8,8 +8,11 @@ const RAIL_COLUMNS = 4
 // Below this many body columns the vertical rail has no room to reveal the
 // prompt beside a tick, so the band above the prompt shows it instead.
 const INLINE_REVEAL_MIN_COLUMNS = 12
-// Cells a hover card keeps for the prompt's text beside the turn's details.
+// Cells a hover card keeps for the prompt's text beside the turn's details,
+// and the desktop's label of the prompt being read beside the bars.
 const MIN_CARD_TEXT = 12
+// Cells the desktop's bars keep however narrow the band: one bar and its marks.
+const MIN_DESKTOP_BARS = 3
 // The mode is the plugin's `mode` setting (userConfig), a row in /config. An
 // earlier version kept it in the store under this key, shared by every session.
 const LEGACY_MODE_KEY = 'mode'
@@ -979,6 +982,9 @@ export const register: Register = (on, options) => {
   // Whether the session started on the terminal, whose band carries the
   // horizontal rail alone; elsewhere the pane stays open beside it.
   let isTerminal = false
+  // Whether the horizontal band was last drawn on a grid of cells (the
+  // terminal); the focus event does not say which surface it came from.
+  let isBandOnGrid = true
   let railColumns = 0
   // The horizontal bar whose card the text line shows, while the ring is on
   // it, and the timer that stops showing it.
@@ -1374,19 +1380,23 @@ export const register: Register = (on, options) => {
       // page (the desktop app) paints a card with no background, in a face of
       // its own widths, so the line beneath shows through: there the text line
       // holds the hovered card alone, and the prompt being read is named after
-      // the bars. It draws its own ring on a bar, beside the hovered one, so
-      // the rail starts none there and shows no ringed card.
+      // the bars. A clicked bar keeps its native ring there beside the hovered
+      // one, so the band takes no ring at all (see the band's ui.focus).
       const isCellGrid = e.surface === 'terminal'
+      isBandOnGrid = isCellGrid
       const width = Math.max(8, e.props.bodyColumns - 2 - RAIL_INSET)
       const current = currentIndex()
       drawnCurrent = current
       const shownRing = isCellGrid && ringed !== undefined && ringed < entries.length ? ringed : undefined
+      // Cells for the bars and their marks: the whole line, or beside the
+      // label of the prompt being read, a gap and a few words of it.
+      const barCells = isCellGrid ? width : Math.max(MIN_DESKTOP_BARS, width - 1 - MIN_CARD_TEXT)
       // More prompts than cells: a window of bars centered on the prompt being
       // read (the newest when none is known), `‹` and `›` marking what it hides.
       // It stays put while the ring moves: the ring keeps its place in the row,
       // not its bar, so a shifted window would move it to another prompt.
-      const isOverflowing = entries.length > width
-      const capacity = isOverflowing ? width - 2 : entries.length
+      const isOverflowing = entries.length > barCells
+      const capacity = isOverflowing ? barCells - 2 : entries.length
       const center = current >= 0 ? current : entries.length - 1
       const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
       const shown = entries.slice(first, first + capacity)
@@ -1416,8 +1426,8 @@ export const register: Register = (on, options) => {
         hidesAfter ? <Text dimColor>›</Text> : null,
       ]
       if (!isCellGrid) {
-        // Each bar as wide as a cell, the marks and a gap beside them.
-        const room = Math.max(8, width - capacity - 3)
+        // Each bar and mark a cell wide, then a gap.
+        const room = width - (isOverflowing ? barCells : entries.length) - 1
         return (
           <Box flexDirection="column" paddingLeft={RAIL_INSET}>
             <Box height={1} width={width}>
@@ -1465,6 +1475,8 @@ export const register: Register = (on, options) => {
   // ringed prompt's card instead, for RING_CARD_MS after each move.
   on('ui.focus', { component: 'AbovePrompt', plugin: 'prompt-rail' }, async ($, e, next) => {
     if (mode !== 'horizontal') return next(e)
+    // A page keeps a clicked bar's ring beside the hovered one: two lit at once.
+    if (!isBandOnGrid) return { deny: 'prompt-rail: on this surface the bars take clicks, not the focus ring' }
     const result = await next(e)
     const index = Number(/^jump-(\d+)/.exec(e.element ?? '')?.[1])
     if (result.deny || !Number.isInteger(index)) return result

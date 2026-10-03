@@ -190,6 +190,40 @@ test('on the desktop a ringed bar paints no card over the line a hovered one rev
   expect((await band.findAll({})).some((node: any) => isDimLabel(node, /^#2 second prompt$/))).toBe(true)
 })
 
+test('on the desktop the band keeps the focus ring off its bars, so a clicked bar does not stay lit beside a hovered one', async ($, on) => {
+  mock.clock(on)
+  const moves: (string | undefined)[] = []
+  on('ui.focus', ($: any, e: any) => {
+    moves.push(e.element)
+    return {}
+  })
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+  const ringed = await $.ui.focus({ component: 'AbovePrompt', requestId: 'above-prompt', plugin: 'prompt-rail', element: 'jump-0', origin: { kind: 'person' } })
+  expect(ringed.deny).toBeDefined()
+  expect(moves).toEqual([])
+})
+
+test('on the desktop the bars leave room beside them for the prompt being read', async ($, on) => {
+  mock.clock(on)
+  await drawPrompts($, on)
+  for (let n = 3; n <= 25; n++) {
+    await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: `m${n}`, props: prompt(`prompt number ${n}`, null) })
+  }
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  const bodyColumns = 30
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'desktop', component: 'AbovePrompt', props: { ...BAND, bodyColumns } })
+  const drawn = await band.findAll({})
+  const bars = drawn.filter((node: any) => node.type === 'Button').length
+  const marks = drawn.filter((node: any) => node.type === 'Text' && (node.text === '‹' || node.text === '›' || node.text === ' ')).length
+  const label = drawn.find((node: any) => isDimLabel(node, /^#2 /))
+  expect(label).toBeDefined()
+  // The bars, their marks, a gap and the label fit the band's width, inset aside.
+  expect(bars + marks + 1 + [...String(label.text)].length).toBeLessThanOrEqual(bodyColumns - 2 - 2)
+  expect(String(label.text)).toMatch(/^#2 second/)
+})
+
 test('a command names a prompt by number, first, last or the words it holds', () => {
   const texts = ['fix the build', 'add tests', 'Fix the docs']
   expect([pickPrompt('2', texts), pickPrompt('#3', texts), pickPrompt('4', texts), pickPrompt('0', texts)]).toEqual([1, 2, -1, -1])
