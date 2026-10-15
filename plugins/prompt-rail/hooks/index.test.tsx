@@ -371,13 +371,17 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
     store.delete(e.key)
     return { value: undefined }
   })
+  // The engine resolves a path that is not absolute on its own host against
+  // the working directory, as a Windows path is on Linux: the end still names
+  // the transcript.
+  const isTranscript = (path: string) => path === disk.path || path.endsWith(disk.path)
   on('fs.read', ($: any, e: any) => {
     disk.reads++
     if (bytes(disk.transcript).length > READ_CAP) return { deny: 'over 4 MiB' }
-    return { value: e.path === disk.path ? disk.transcript : '' }
+    return { value: isTranscript(e.path) ? disk.transcript : '' }
   })
   on('fs.stat', ($: any, e: any) => ({
-    value: { kind: 'file', size: e.path === disk.path ? bytes(disk.transcript).length : 0, mtimeMs: disk.mtimeMs, isLink: false },
+    value: { kind: 'file', size: isTranscript(e.path) ? bytes(disk.transcript).length : 0, mtimeMs: disk.mtimeMs, isLink: false },
   }))
   // `tail -c +N path`, or PowerShell reading from $env:PROMPT_RAIL_AT: the
   // file's bytes from there on, in pieces of a megabyte or so, as a child's
@@ -578,10 +582,10 @@ test('on Windows, where tail cannot start, a large transcript is streamed by Pow
   const clock = mock.clock(on)
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: path })
   await clock.settle()
-  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト'])
   expect(disk.spawns.map(argv => argv[0])).toEqual(['tail', 'powershell'])
   expect(disk.spawnEnvs[1]).toEqual({ PROMPT_RAIL_FILE: path, PROMPT_RAIL_AT: '0' })
   expect(disk.toasts).toEqual([])
+  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト'])
   // A later read asks PowerShell for the bytes after the last row, as it asks tail.
   const before = bytes(disk.transcript).length
   const lastRow = bytes(`${JSON.stringify({ parentUuid: 'd1', ...bigRows()[5] })}\n`).length
