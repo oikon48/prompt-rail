@@ -5,8 +5,8 @@
 A rail of your prompts for Claude Code. Hover to read one, click to jump back to it.
 
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-D97757)
-![Claude Code 2.1.280+](https://img.shields.io/badge/Claude%20Code-2.1.280%2B-555)
-![Function hooks](https://img.shields.io/badge/function%20hooks-experimental-orange)
+![Claude Code 2.1.287+](https://img.shields.io/badge/Claude%20Code-2.1.287%2B-555)
+![Mod](https://img.shields.io/badge/mod-TypeScript-3178C6)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 <img src="docs/demo.gif" alt="prompt-rail demo: hovering the rail previews a prompt and its turn, clicking jumps the transcript to it" width="800">
@@ -15,13 +15,9 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
 
 ## Quick start
 
-1. Turn on function hooks (early access, Claude Code 2.1.280+) in `~/.claude/settings.json`:
+prompt-rail is a mod, so it needs Claude Code 2.1.287 or later, where mods are on by default. If you set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` during early access, you can remove it, since Claude Code now ignores it.
 
-   ```json
-   { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
-   ```
-
-2. Install, from your shell or inside a session:
+1. Install, from your shell or inside a session:
 
    ```bash
    claude plugin marketplace add oikon48/prompt-rail
@@ -33,7 +29,7 @@ A rail of your prompts for Claude Code. Hover to read one, click to jump back to
    /plugin install prompt-rail@oikon48
    ```
 
-3. Start a new session. The rail opens on its own.
+2. Start a new session. The rail opens on its own.
 
 Mouse works best with `"tui": "fullscreen"`.
 
@@ -108,7 +104,7 @@ The rail lists the prompts of the live branch, so prompts abandoned with `/rewin
 <details>
 <summary>Known limits</summary>
 
-- Function hooks are early access, and their API may change between Claude Code releases.
+- The mods API may still change between Claude Code releases.
 - The hover card with the turn summary is part of the horizontal rail.
 - The Claude desktop app draws the horizontal rail and its hover cards, but a click cannot jump there. The app gives a plugin no way to scroll its transcript, so the rail says so once a session. The prompt being read is named beside the bars rather than on the line above them, since the app paints a card over that line without hiding what is under it. Checked with Claude Code 2.1.280, the app did not draw the vertical pane.
 - The dock width is shared by all plugin panes; drag its edge to narrow it, down to 24 columns.
@@ -126,6 +122,14 @@ claude plugin test plugins/prompt-rail
 ```
 
 Run `/plugin-types .claude/types` in a session here for type declarations. Bump the version in `plugins/prompt-rail/.claude-plugin/plugin.json` with each release, since installed copies update only when it changes.
+
+The Claude directory listing tracks the `release` branch rather than `main`, so merged changes reach it only when a release is pushed there. After a Release PR merges, publish it with:
+
+```bash
+git push origin main:release
+```
+
+The directory picks the new commit up within about six hours and scans it before it goes live.
 
 ## License
 
