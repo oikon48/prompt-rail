@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, drawnRow, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, tick, turnLine } from './index.tsx'
+import { bar, drawnRow, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, streamArgv, tick, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -525,6 +525,11 @@ test('where no process can run, a large transcript leaves the drawn list and say
   disk.spawnFails = true
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await clock.settle()
+  // The engine drops a toast before the session is bound: the warning waits
+  // for session.start.
+  expect(disk.toasts.filter(text => text.includes('too large'))).toHaveLength(0)
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.toasts.filter(text => text.includes('too large'))).toHaveLength(1)
   await drawRow($, 'p2', '二番目のプロンプト')
   disk.mtimeMs = 2
   await stop($)
@@ -533,6 +538,32 @@ test('where no process can run, a large transcript leaves the drawn list and say
   await clock.settle()
   expect(await railLabels($)).toEqual(['二番目のプロンプト'])
   expect(disk.toasts.filter(text => text.includes('too large'))).toHaveLength(1)
+})
+
+test('a resumed prompt row, drawn with no origin stamped, is listed where the file is not read', async ($, on) => {
+  const { disk, clock } = bigWorld(on)
+  disk.spawnFails = true
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await clock.settle()
+  const row = await $.ui.mount({
+    plugin: 'prompt-rail',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'p1',
+    props: { ...prompt('first', null), origin: { kind: 'unclassified' as const } },
+  })
+  await row.unmount()
+  expect(await railLabels($)).toEqual(['first'])
+})
+
+test('a large transcript on a Windows drive is streamed by PowerShell, since tail may be missing there', () => {
+  expect(streamArgv('/t/s1.jsonl', 0)).toEqual(['tail', '-c', '+1', '/t/s1.jsonl'])
+  expect(streamArgv('/t/s1.jsonl', 4096)).toEqual(['tail', '-c', '+4097', '/t/s1.jsonl'])
+  const argv = streamArgv("C:\\Users\\o'brien\\.claude\\projects\\s1.jsonl", 4096)
+  expect(argv.slice(0, 4)).toEqual(['powershell', '-NoProfile', '-NonInteractive', '-Command'])
+  expect(argv[4]).toContain("[IO.File]::Open('C:\\Users\\o''brien\\.claude\\projects\\s1.jsonl', 'Open', 'Read', 'ReadWrite')")
+  expect(argv[4]).toContain('$f.Position = 4096;')
+  expect(argv[4]).toContain('CopyTo([Console]::OpenStandardOutput())')
 })
 
 test('the session start remembers its transcript under its own key', async ($, on) => {

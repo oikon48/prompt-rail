@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed the rail staying empty on Windows for a transcript over 4 MiB (#57): it streamed the file with `tail`, which most Windows sessions do not have on their PATH; a file on a Windows drive is now streamed by PowerShell, which every Windows has
+- Fixed the warning that a large transcript could not be read going unseen when a resumed session raised it before the session was bound; it is now said once the session starts
+- Fixed the prompts of a resumed session, drawn before any read of its file, not being listed as drawn when the file could not be read
 - Added `/prompt-rail-toggle`, a bare command for a keybinding (`command:prompt-rail-toggle` in `~/.claude/keybindings.json`): it hides the rail, or brings it back in the layout last on (horizontal until another was used)
 
 ## 0.7.1

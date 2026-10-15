@@ -3,6 +3,9 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 const PANE = 'prompt-rail'
 // Rows the person typed (terminal composer, desktop/remote bridge, SDK host).
 const PROMPT_KINDS = new Set(['composer', 'bridge', 'sdk'])
+// The rows of a resumed session are drawn with no origin stamped: the
+// person's prompts all the same, listed as drawn when the file is not read.
+const DRAWN_PROMPT_KINDS = new Set([...PROMPT_KINDS, 'unclassified'])
 // Columns the docked rail asks for: a tick and a little air.
 const RAIL_COLUMNS = 4
 // Below this many body columns the vertical rail has no room to reveal the
@@ -412,6 +415,8 @@ type Seen = {
   lastUuid: string | undefined
   isReading: boolean
   warned: string
+  // What a read before the session was bound had to say, said once it is.
+  notice: string | undefined
 }
 const unseen = (): Seen => ({
   path: '',
@@ -423,6 +428,7 @@ const unseen = (): Seen => ({
   lastUuid: undefined,
   isReading: false,
   warned: '',
+  notice: undefined,
 })
 
 // Take the complete lines of `text`, which starts at byte `at` of the file,
@@ -451,6 +457,20 @@ const indexSeen = (seen: Seen, rest: string) => {
   return indexRows(last ? [...seen.rows, last] : seen.rows)
 }
 
+// A path of a Windows drive (`C:\...`): there `tail` is not a given (Git for
+// Windows ships one, but off the PATH of most sessions) while PowerShell is.
+const isWindowsPath = (path: string) => /^[a-zA-Z]:[\\/]/.test(path)
+
+// The command that writes a file's bytes from `at` on to its standard
+// output: `tail -c +N`, or on Windows PowerShell copying the file's stream
+// from that position, the file left open for the engine still writing it.
+export const streamArgv = (path: string, at: number) => {
+  if (!isWindowsPath(path)) return ['tail', '-c', `+${at + 1}`, path]
+  const quoted = path.replace(/'/g, "''")
+  const script = `$f = [IO.File]::Open('${quoted}', 'Open', 'Read', 'ReadWrite'); $f.Position = ${at}; $f.CopyTo([Console]::OpenStandardOutput()); $f.Dispose()`
+  return ['powershell', '-NoProfile', '-NonInteractive', '-Command', script]
+}
+
 // Read the file on from the last row read, with tail, since $.fs.read takes
 // no more than READ_CAP. That row comes first and must still be there, else
 // the file was replaced: false then, and nothing is taken. Otherwise the rest
@@ -459,7 +479,8 @@ async function streamRows($: EngineInterface, path: string, seen: Seen) {
   let expected = seen.lastUuid
   let at = expected === undefined ? seen.offset : seen.lastStart
   let carry = ''
-  const child = $.process.spawn({ argv: ['tail', '-c', `+${at + 1}`, path] })
+  const argv = streamArgv(path, at)
+  const child = $.process.spawn({ argv })
   for await (const piece of child) {
     if (piece.stream !== 'stdout') continue
     let text = carry + piece.text
@@ -479,14 +500,14 @@ async function streamRows($: EngineInterface, path: string, seen: Seen) {
     at = seen.offset
   }
   const { code } = await child.result
-  if (code !== 0) throw new Error(`tail exited with ${code}`)
+  if (code !== 0) throw new Error(`${argv[0]} exited with ${code}`)
   return carry
 }
 
 // Stream a transcript too large for $.fs.read, from its start when it was
 // replaced; its index, or undefined when it could not be read, which is said
 // once for the file.
-async function readLarge($: EngineInterface, path: string, seen: Seen, size: number, mtimeMs: number) {
+async function readLarge($: EngineInterface, path: string, seen: Seen, size: number, mtimeMs: number, say: (text: string) => void) {
   try {
     let rest = await streamRows($, path, seen)
     if (rest === false) {
@@ -500,10 +521,17 @@ async function readLarge($: EngineInterface, path: string, seen: Seen, size: num
     if (seen.warned !== path) {
       seen.warned = path
       const megabytes = Math.round(size / 1024 / 1024)
-      $.ui.toast(`the transcript is ${megabytes} MB, too large to read here (${(err as Error).message}); prompts are listed as they are drawn`)
+      say(`the transcript is ${megabytes} MB, too large to read here (${(err as Error).message}); prompts are listed as they are drawn`)
     }
     return undefined
   }
+}
+
+// A way to say a read's warning: a toast once the session is bound (before
+// session.start the engine drops one), else kept in `seen.notice` for then.
+const sayOrKeep = ($: EngineInterface, seen: Seen, isBound: () => boolean) => (text: string) => {
+  if (isBound()) $.ui.toast(text)
+  else seen.notice = text
 }
 
 // The transcript's index, or undefined when it is as `seen` last read it (a
@@ -513,12 +541,18 @@ async function readLarge($: EngineInterface, path: string, seen: Seen, size: num
 // where the last read ended; when that is more than READ_CAP, as on resuming a
 // long session, it is read without holding the hook, and `whenLate` gets the
 // index once it is done.
-async function readTranscript($: EngineInterface, path: string, seen: Seen, whenLate: (index: TranscriptIndex) => void) {
+async function readTranscript(
+  $: EngineInterface,
+  path: string,
+  seen: Seen,
+  whenLate: (index: TranscriptIndex) => void,
+  say: (text: string) => void = text => $.ui.toast(text),
+) {
   if (seen.isReading) return undefined
   try {
     const { size, mtimeMs } = await $.fs.stat(path)
     if (seen.path === path && seen.size === size && seen.mtimeMs === mtimeMs) return undefined
-    if (seen.path !== path || size < seen.offset) Object.assign(seen, { ...unseen(), warned: seen.warned })
+    if (seen.path !== path || size < seen.offset) Object.assign(seen, { ...unseen(), warned: seen.warned, notice: seen.notice })
     if (size <= READ_CAP) {
       const text = await $.fs.read(path)
       Object.assign(seen, { rows: [], lastStart: 0, lastUuid: undefined })
@@ -527,7 +561,7 @@ async function readTranscript($: EngineInterface, path: string, seen: Seen, when
       return indexSeen(seen, rest)
     }
     seen.isReading = true
-    const reading = readLarge($, path, seen, size, mtimeMs).finally(() => {
+    const reading = readLarge($, path, seen, size, mtimeMs, say).finally(() => {
       seen.isReading = false
     })
     if (size - seen.offset <= READ_CAP) return await reading
@@ -719,6 +753,9 @@ export const register: Register = (on, options) => {
   // Notices a session gives once (see jumpTo).
   const notices = { isUnscrollableSaid: false }
   const seen: Seen = unseen()
+  // Whether session.start has run: before it, the engine drops a toast, so a
+  // warning the classic SessionStart's read raises waits in `seen.notice`.
+  let isBound = false
   // Row key -> the id a prompt's row was last drawn under (see drawnRow).
   const drawn = new Map<string, string>()
   // The ids of the prompts the last transcript read listed.
@@ -1022,6 +1059,11 @@ export const register: Register = (on, options) => {
       immediate: true,
     })
     isTerminal = e.surface === 'terminal'
+    isBound = true
+    if (seen.notice !== undefined) {
+      $.ui.toast(seen.notice)
+      seen.notice = undefined
+    }
     // Move a mode an earlier version stored into the setting, once. Writing
     // the setting reloads this module, so everything after it is best effort.
     const stored = await $.store.get(LEGACY_MODE_KEY)
@@ -1175,9 +1217,15 @@ export const register: Register = (on, options) => {
       Object.assign(seen, unseen())
       await redrawRail($)
     } else {
-      const index = await readTranscript($, e.transcript_path, seen, index => {
-      if (merge(index)) void redrawRail($)
-    })
+      const index = await readTranscript(
+        $,
+        e.transcript_path,
+        seen,
+        index => {
+          if (merge(index)) void redrawRail($)
+        },
+        sayOrKeep($, seen, () => isBound),
+      )
       if (index && merge(index)) await redrawRail($)
     }
     listedAtRest = entries.length
@@ -1266,7 +1314,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
     // A slash command's row is drawn as a user row too; it is not a prompt.
     const text = e.props.text.replace(VIEW_CONTEXT, '').trim()
-    if (PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
+    if (DRAWN_PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
       drawn.set(rowKey(e.requestId), e.requestId)
       if (listDrawn(e.requestId, text)) redrawRailLater($)
       if (e.props.onScreen !== undefined) {
