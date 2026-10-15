@@ -457,9 +457,10 @@ const indexSeen = (seen: Seen, rest: string) => {
   return indexRows(last ? [...seen.rows, last] : seen.rows)
 }
 
-// A path of a Windows drive (`C:\...`): there `tail` is not a given (Git for
-// Windows ships one, but off the PATH of most sessions) while PowerShell is.
-const isWindowsPath = (path: string) => /^[a-zA-Z]:[\\/]/.test(path)
+// A Windows path, of a drive (`C:\...`) or a network share (`\\host\...`):
+// there `tail` is not a given (Git for Windows ships one, but off the PATH of
+// most sessions) while PowerShell is.
+const isWindowsPath = (path: string) => /^([a-zA-Z]:[\\/]|\\\\)/.test(path)
 
 // The command that writes a file's bytes from `at` on to its standard
 // output: `tail -c +N`, or on Windows PowerShell copying the file's stream
@@ -1312,9 +1313,10 @@ export const register: Register = (on, options) => {
 
   // Record every prompt row as it is drawn, and which rows the viewport shows.
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
-    // A slash command's row is drawn as a user row too; it is not a prompt.
+    // A slash command's row is drawn as a user row too, and a resumed one as
+    // its stored wrapper; neither is a prompt.
     const text = e.props.text.replace(VIEW_CONTEXT, '').trim()
-    if (DRAWN_PROMPT_KINDS.has(e.props.origin.kind) && text && !text.startsWith('/')) {
+    if (DRAWN_PROMPT_KINDS.has(e.props.origin.kind) && text && !WRAPPER.test(text) && !text.startsWith('/')) {
       drawn.set(rowKey(e.requestId), e.requestId)
       if (listDrawn(e.requestId, text)) redrawRailLater($)
       if (e.props.onScreen !== undefined) {

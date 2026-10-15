@@ -553,6 +553,15 @@ test('a resumed prompt row, drawn with no origin stamped, is listed where the fi
     props: { ...prompt('first', null), origin: { kind: 'unclassified' as const } },
   })
   await row.unmount()
+  // A resumed slash command's row is drawn as its stored wrapper: not a prompt.
+  const wrapper = await $.ui.mount({
+    plugin: 'prompt-rail',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'c1',
+    props: { ...prompt('<command-name>/clear</command-name>', null), origin: { kind: 'unclassified' as const } },
+  })
+  await wrapper.unmount()
   expect(await railLabels($)).toEqual(['first'])
 })
 
@@ -564,6 +573,7 @@ test('a large transcript on a Windows drive is streamed by PowerShell, since tai
   expect(argv[4]).toContain("[IO.File]::Open('C:\\Users\\o''brien\\.claude\\projects\\s1.jsonl', 'Open', 'Read', 'ReadWrite')")
   expect(argv[4]).toContain('$f.Position = 4096;')
   expect(argv[4]).toContain('CopyTo([Console]::OpenStandardOutput())')
+  expect(streamArgv('\\\\nas\\home\\s1.jsonl', 0)[0]).toBe('powershell')
 })
 
 test('the session start remembers its transcript under its own key', async ($, on) => {
