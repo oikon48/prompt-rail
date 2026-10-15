@@ -20,6 +20,9 @@ const LEGACY_MODE_KEY = 'mode'
 // with no /config row for plugin fields), so a module reloaded mid-session
 // starts in it again. Keyed by session, so a later session starts clean.
 const SESSION_MODE_KEY_PREFIX = 'session-mode:'
+// The mode last on (vertical or horizontal), so `prompt-rail-toggle` turned
+// off has a mode to come back to; horizontal until another was written.
+const LAST_ON_KEY = 'last-on'
 const MODE_SETTING = 'prompt-rail.mode'
 // `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
 // session.start carries no path) can rebuild its list. One key per session, so
@@ -567,6 +570,7 @@ async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
 // sessions) throws instead of denying, and the mode then holds for this
 // session only.
 async function writeMode($: EngineInterface, mode: Mode) {
+  if (mode !== 'off') await $.store.set(LAST_ON_KEY, mode)
   try {
     const result = await $.config.set({ key: MODE_SETTING, value: mode })
     if (result.deny) $.ui.toast(`the mode was not saved: ${result.deny}`)
@@ -1012,6 +1016,11 @@ export const register: Register = (on, options) => {
     for (const [name, way] of STEP_COMMANDS) {
       await $.command.register({ name, description: `Jump to the ${way} prompt in the prompt rail.`, immediate: true })
     }
+    await $.command.register({
+      name: 'prompt-rail-toggle',
+      description: 'Toggle the rail: off ↔ the mode last on (vertical or horizontal).',
+      immediate: true,
+    })
     isTerminal = e.surface === 'terminal'
     // Move a mode an earlier version stored into the setting, once. Writing
     // the setting reloads this module, so everything after it is best effort.
@@ -1056,9 +1065,26 @@ export const register: Register = (on, options) => {
 
   on('command.run', async ($, e, next) => {
     const isStep = STEP_COMMANDS.some(([name]) => name === e.command)
-    if (!isStep && e.command !== 'prompt-rail') return next(e)
-    const asked = isStep ? '' : e.args.trim()
+    if (!isStep && e.command !== 'prompt-rail' && e.command !== 'prompt-rail-toggle') return next(e)
+    const asked = isStep || e.command === 'prompt-rail-toggle' ? '' : e.args.trim()
     unring()
+    // The toggle, as `/prompt-rail <mode>` does it: switch at once, then write
+    // the setting, whose change reloads this module in the new mode.
+    if (e.command === 'prompt-rail-toggle') {
+      if (mode === 'off') {
+        const lastOn = await $.store.get(LAST_ON_KEY)
+        mode = isMode(lastOn) && lastOn !== 'off' ? lastOn : 'horizontal'
+      } else {
+        // Remembered here too: the mode may have come from /config or an
+        // earlier version, neither of which went through writeMode.
+        await $.store.set(LAST_ON_KEY, mode)
+        mode = 'off'
+      }
+      await seatRail($, mode, isTerminal)
+      await redrawRail($)
+      await writeMode($, mode)
+      return {}
+    }
     const index = askedIndex(e.command, asked)
     if (index !== undefined) {
       // The main conversation's rows are not drawn beside a subagent's, so a

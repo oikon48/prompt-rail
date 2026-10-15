@@ -60,6 +60,7 @@ Mouse works best with `"tui": "fullscreen"`.
 | `/prompt-rail 12`, `#12` | Jump to prompt #12 |
 | `/prompt-rail find <words>` | Jump to the newest prompt that holds the words |
 | `/prompt-rail-next`, `/prompt-rail-prev` | Jump to the next or previous prompt, with no argument, for a keybinding |
+| `/prompt-rail-toggle` | Hide the rail, or bring it back in the layout last on, with no argument, for a keybinding |
 | `/prompt-rail` | Reopen the rail in the current layout |
 
 The layout is also the "Rail mode" row in `/config`, and it is kept across sessions.

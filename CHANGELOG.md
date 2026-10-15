@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added `/prompt-rail-toggle`, a bare command for a keybinding (`command:prompt-rail-toggle` in `~/.claude/keybindings.json`): it hides the rail, or brings it back in the layout last on (horizontal until another was used)
+
 ## 0.7.1
 
 - Fixed the horizontal rail in the Claude desktop app drawing a hovered prompt's card over the dim line of the prompt being read, so both texts showed at once; there the line above the bars now shows the hovered card alone, and the prompt being read is named beside the bars, with room kept for it however many bars there are

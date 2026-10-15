@@ -1167,6 +1167,65 @@ test('/prompt-rail off hides the rail until a mode turns it back on', async ($, 
   expect((await onBand.findAll({ type: 'Button' })).length).toBeGreaterThan(0)
 })
 
+// One bare command behind a key: off ↔ the mode last on, so the person never
+// types a mode to bring the rail back.
+test('/prompt-rail-toggle hides the rail and brings back the mode last on', async ($, on) => {
+  const disk = beneath()
+  const store = world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  // Registered bare, so a keybinding can name it (`command:prompt-rail-toggle`).
+  expect(disk.commands.map(command => command.name)).toContain('prompt-rail-toggle')
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
+  await $.command.run({ command: 'prompt-rail-toggle' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('off')
+  expect(disk.panes.at(-1)).toBe('close prompt-rail')
+  await $.command.run({ command: 'prompt-rail-toggle' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('vertical')
+  expect(disk.panes.at(-1)).toBe('open prompt-rail')
+  expect(store.get('last-on')).toBe('vertical')
+})
+
+test('/prompt-rail-toggle from a mode goes off, and from off with nothing remembered comes back horizontal', async ($, on) => {
+  const disk = beneath()
+  world(on, {}, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  // The default mode is horizontal: the toggle takes it off.
+  await $.command.run({ command: 'prompt-rail-toggle' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('off')
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+  // Nothing but horizontal was ever on, so it is what comes back.
+  await $.command.run({ command: 'prompt-rail-toggle' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('horizontal')
+  await band.unmount()
+  const onBand = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await onBand.findAll({ type: 'Button' })).length).toBeGreaterThan(0)
+})
+
+// A mode this module never wrote (one set in /config, or kept from before the
+// toggle existed) is still the one the toggle brings back.
+test('/prompt-rail-toggle brings back a mode it did not write itself', async ($, on) => {
+  const disk = beneath()
+  world(on, { 'session-mode:s1': 'vertical' }, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'prompt-rail-toggle' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('off')
+  await $.command.run({ command: 'prompt-rail-toggle' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('vertical')
+})
+
+test('/prompt-rail-toggle ignores a remembered mode that is not one to come back to', async ($, on) => {
+  const disk = beneath()
+  world(on, { 'session-mode:s1': 'off', 'last-on': 'sideways' }, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'prompt-rail-toggle' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('horizontal')
+})
+
 // The kit loads the module with its default options, so the session starts
 // again after the command, as a module reloaded with the setting off does.
 test('a session starts with no rail while the setting is off', async ($, on) => {
@@ -1202,6 +1261,7 @@ test('/prompt-rail runs mid-turn and takes next and prev', async ($, on) => {
     // Argument-free, for a keybinding to name.
     expect.objectContaining({ name: 'prompt-rail-next', immediate: true }),
     expect.objectContaining({ name: 'prompt-rail-prev', immediate: true }),
+    expect.objectContaining({ name: 'prompt-rail-toggle', immediate: true }),
   ])
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await $.command.run({ command: 'prompt-rail', args: 'next' })
