@@ -23,7 +23,6 @@ const SESSION_MODE_KEY_PREFIX = 'session-mode:'
 // The mode last on (vertical or horizontal), so `prompt-rail-toggle` turned
 // off has a mode to come back to; horizontal until another was written.
 const LAST_ON_KEY = 'last-on'
-const MODE_SETTING = 'prompt-rail.mode'
 // `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
 // session.start carries no path) can rebuild its list. One key per session, so
 // sessions starting together never rewrite each other's; the newest few stay.
@@ -621,13 +620,15 @@ async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
 }
 
 // Write the mode setting, as a change in /config would; say so if refused.
+// The key stays fixed text in the call, so the Claude directory's checks can
+// read which setting the mod writes.
 // A session with no /config row for plugin fields (the desktop app's SDK
 // sessions) throws instead of denying, and the mode then holds for this
 // session only.
 async function writeMode($: EngineInterface, mode: Mode) {
   if (mode !== 'off') await $.store.set(LAST_ON_KEY, mode)
   try {
-    const result = await $.config.set({ key: MODE_SETTING, value: mode })
+    const result = await $.config.set({ key: 'prompt-rail.mode', value: mode })
     if (result.deny) $.ui.toast(`the mode was not saved: ${result.deny}`)
   } catch (err) {
     await $.store.set(`${SESSION_MODE_KEY_PREFIX}${await $.session.id()}`, mode)
