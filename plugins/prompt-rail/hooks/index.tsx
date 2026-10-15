@@ -412,6 +412,9 @@ type Seen = {
   lastUuid: string | undefined
   isReading: boolean
   warned: string
+  // What a failed read has to say, said by the next hook to run once the
+  // session is bound (before session.start the engine drops a toast).
+  notice: string | undefined
 }
 const unseen = (): Seen => ({
   path: '',
@@ -423,6 +426,7 @@ const unseen = (): Seen => ({
   lastUuid: undefined,
   isReading: false,
   warned: '',
+  notice: undefined,
 })
 
 // Take the complete lines of `text`, which starts at byte `at` of the file,
@@ -451,16 +455,59 @@ const indexSeen = (seen: Seen, rest: string) => {
   return indexRows(last ? [...seen.rows, last] : seen.rows)
 }
 
-// Read the file on from the last row read, with tail, since $.fs.read takes
-// no more than READ_CAP. That row comes first and must still be there, else
-// the file was replaced: false then, and nothing is taken. Otherwise the rest
-// after the last complete line.
+// A Windows path, of a drive (`C:\...`) or a network share (`\\host\...`).
+const isWindowsPath = (path: string) => /^([a-zA-Z]:[\\/]|\\\\)/.test(path)
+
+// The commands that write a file's bytes from `at` on to their standard
+// output, tried in order until one starts: `tail -c +N`, and on a Windows
+// path, where tail is not a given (Git for Windows ships one, off the PATH of
+// most sessions), PowerShell copying the file's stream from that position.
+// The path and position reach the script through its environment, never its
+// text, since PowerShell reads curly quotes as quotes too; the file stays
+// shared for the engine to write, rename or delete; a read that fails ends
+// the script with a non-zero code instead of passing as a short file.
+export const streamRequests = (path: string, at: number): { argv: string[]; env?: Record<string, string> }[] => {
+  const tail = { argv: ['tail', '-c', `+${at + 1}`, path] }
+  if (!isWindowsPath(path)) return [tail]
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$f = [IO.File]::Open($env:PROMPT_RAIL_FILE, 'Open', 'Read', 'ReadWrite, Delete')",
+    'try { $f.Position = [long]$env:PROMPT_RAIL_AT; $f.CopyTo([Console]::OpenStandardOutput()) } finally { $f.Dispose() }',
+  ].join('; ')
+  const powershell = {
+    argv: ['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
+    env: { PROMPT_RAIL_FILE: path, PROMPT_RAIL_AT: String(at) },
+  }
+  return [tail, powershell]
+}
+
+// Start the first of `requests` whose command can: the engine rejects a
+// stream's first pull when it cannot (no `tail` on the PATH), so that pull is
+// taken here and handed on with the stream. The last request's failure is
+// the caller's.
+async function startStream($: EngineInterface, requests: ReturnType<typeof streamRequests>) {
+  for (const [i, request] of requests.entries()) {
+    const child = $.process.spawn(request)
+    try {
+      return { child, first: await child.next(), argv: request.argv }
+    } catch (err) {
+      if (i === requests.length - 1) throw err
+    }
+  }
+  throw new Error('no command to read with')
+}
+
+// Read the file on from the last row read, with tail or what stands in for
+// it (see streamRequests), since $.fs.read takes no more than READ_CAP. That
+// row comes first and must still be there, else the file was replaced: false
+// then, and nothing is taken. Otherwise the rest after the last complete line.
 async function streamRows($: EngineInterface, path: string, seen: Seen) {
   let expected = seen.lastUuid
   let at = expected === undefined ? seen.offset : seen.lastStart
   let carry = ''
-  const child = $.process.spawn({ argv: ['tail', '-c', `+${at + 1}`, path] })
-  for await (const piece of child) {
+  const { child, first, argv } = await startStream($, streamRequests(path, at))
+  for (let pull = first; !pull.done; pull = await child.next()) {
+    const piece = pull.value
     if (piece.stream !== 'stdout') continue
     let text = carry + piece.text
     if (expected !== undefined) {
@@ -479,13 +526,13 @@ async function streamRows($: EngineInterface, path: string, seen: Seen) {
     at = seen.offset
   }
   const { code } = await child.result
-  if (code !== 0) throw new Error(`tail exited with ${code}`)
+  if (code !== 0) throw new Error(`${argv[0]} exited with ${code}`)
   return carry
 }
 
 // Stream a transcript too large for $.fs.read, from its start when it was
-// replaced; its index, or undefined when it could not be read, which is said
-// once for the file.
+// replaced; its index, or undefined when it could not be read, which is left
+// in `seen.notice` to be said once for the file (see tellNotice).
 async function readLarge($: EngineInterface, path: string, seen: Seen, size: number, mtimeMs: number) {
   try {
     let rest = await streamRows($, path, seen)
@@ -500,10 +547,18 @@ async function readLarge($: EngineInterface, path: string, seen: Seen, size: num
     if (seen.warned !== path) {
       seen.warned = path
       const megabytes = Math.round(size / 1024 / 1024)
-      $.ui.toast(`the transcript is ${megabytes} MB, too large to read here (${(err as Error).message}); prompts are listed as they are drawn`)
+      seen.notice = `the transcript is ${megabytes} MB, too large to read here (${(err as Error).message}); prompts are listed as they are drawn`
     }
     return undefined
   }
+}
+
+// Say what a failed read left in `seen.notice`, once the session is bound:
+// a toast before session.start is dropped, so it waits for the next hook.
+const tellNotice = ($: EngineInterface, seen: Seen, isBound: boolean) => {
+  if (!isBound || seen.notice === undefined) return
+  $.ui.toast(seen.notice)
+  seen.notice = undefined
 }
 
 // The transcript's index, or undefined when it is as `seen` last read it (a
@@ -512,13 +567,13 @@ async function readLarge($: EngineInterface, path: string, seen: Seen, size: num
 // way. Records what it read in `seen`. A file over READ_CAP is read on from
 // where the last read ended; when that is more than READ_CAP, as on resuming a
 // long session, it is read without holding the hook, and `whenLate` gets the
-// index once it is done.
-async function readTranscript($: EngineInterface, path: string, seen: Seen, whenLate: (index: TranscriptIndex) => void) {
+// index once it is done, or undefined when it could not be read.
+async function readTranscript($: EngineInterface, path: string, seen: Seen, whenLate: (index: TranscriptIndex | undefined) => void) {
   if (seen.isReading) return undefined
   try {
     const { size, mtimeMs } = await $.fs.stat(path)
     if (seen.path === path && seen.size === size && seen.mtimeMs === mtimeMs) return undefined
-    if (seen.path !== path || size < seen.offset) Object.assign(seen, { ...unseen(), warned: seen.warned })
+    if (seen.path !== path || size < seen.offset) Object.assign(seen, { ...unseen(), warned: seen.warned, notice: seen.notice })
     if (size <= READ_CAP) {
       const text = await $.fs.read(path)
       Object.assign(seen, { rows: [], lastStart: 0, lastUuid: undefined })
@@ -531,7 +586,7 @@ async function readTranscript($: EngineInterface, path: string, seen: Seen, when
       seen.isReading = false
     })
     if (size - seen.offset <= READ_CAP) return await reading
-    void reading.then(index => index && whenLate(index))
+    void reading.then(whenLate)
     return undefined
   } catch {
     seen.isReading = false
@@ -719,6 +774,8 @@ export const register: Register = (on, options) => {
   // Notices a session gives once (see jumpTo).
   const notices = { isUnscrollableSaid: false }
   const seen: Seen = unseen()
+  // Whether session.start has run; before it a toast is dropped (see tellNotice).
+  let isBound = false
   // Row key -> the id a prompt's row was last drawn under (see drawnRow).
   const drawn = new Map<string, string>()
   // The ids of the prompts the last transcript read listed.
@@ -1022,6 +1079,8 @@ export const register: Register = (on, options) => {
       immediate: true,
     })
     isTerminal = e.surface === 'terminal'
+    isBound = true
+    tellNotice($, seen, isBound)
     // Move a mode an earlier version stored into the setting, once. Writing
     // the setting reloads this module, so everything after it is best effort.
     const stored = await $.store.get(LEGACY_MODE_KEY)
@@ -1037,9 +1096,11 @@ export const register: Register = (on, options) => {
     // the transcript this session's classic SessionStart remembered.
     const transcriptPath = await rememberedTranscript($)
     const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen, index => {
-      if (merge(index)) void redrawRail($)
+      if (index && merge(index)) void redrawRail($)
+      tellNotice($, seen, isBound)
     })
     if (index && merge(index)) await redrawRail($)
+    tellNotice($, seen, isBound)
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /prompt-rail); below that it waits undrawn.
@@ -1176,9 +1237,11 @@ export const register: Register = (on, options) => {
       await redrawRail($)
     } else {
       const index = await readTranscript($, e.transcript_path, seen, index => {
-      if (merge(index)) void redrawRail($)
-    })
+        if (index && merge(index)) void redrawRail($)
+        tellNotice($, seen, isBound)
+      })
       if (index && merge(index)) await redrawRail($)
+      tellNotice($, seen, isBound)
     }
     listedAtRest = entries.length
     await rememberTranscript($, e.session_id, e.transcript_path)
@@ -1187,9 +1250,11 @@ export const register: Register = (on, options) => {
 
   on('classic.Stop', async ($, e, next) => {
     const index = await readTranscript($, e.transcript_path, seen, index => {
-      if (merge(index)) void redrawRail($)
+      if (index && merge(index)) void redrawRail($)
+      tellNotice($, seen, isBound)
     })
     if (index && merge(index)) await redrawRail($)
+    tellNotice($, seen, isBound)
     return next(e)
   })
 
@@ -1207,9 +1272,11 @@ export const register: Register = (on, options) => {
     // index does not know can only be this turn's (see currentIndex).
     const index = seen.path
       ? await readTranscript($, seen.path, seen, index => {
-          if (merge(index)) void redrawRail($)
+          if (index && merge(index)) void redrawRail($)
+          tellNotice($, seen, isBound)
         })
       : undefined
+    tellNotice($, seen, isBound)
     if (index) {
       merge(index)
       // A row the file no longer holds (rewound or compacted away) would

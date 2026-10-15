@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, drawnRow, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, tick, turnLine } from './index.tsx'
+import { bar, drawnRow, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, streamRequests, tick, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -324,10 +324,15 @@ type Beneath = {
   // plugin pinned as its status (undefined for a clear).
   placed: boolean
   status: (string | undefined)[]
-  // Each `tail` the plugin spawned, as its argv, and whether spawning fails
-  // (the desktop app and SDK hosts run no processes).
+  // The transcript's path, as the engine names it.
+  path: string
+  // Each reader the plugin spawned, as its argv and its env, and whether
+  // spawning fails (the desktop app and SDK hosts run no processes) or only
+  // `tail` cannot start (a Windows PATH without Git's tools).
   spawns: string[][]
+  spawnEnvs: (Record<string, string> | undefined)[]
   spawnFails: boolean
+  noTail: boolean
 }
 const beneath = (transcript = TRANSCRIPT): Beneath => ({
   transcript,
@@ -341,8 +346,11 @@ const beneath = (transcript = TRANSCRIPT): Beneath => ({
   toasts: [],
   placed: true,
   status: [],
+  path: '/t/s1.jsonl',
   spawns: [],
+  spawnEnvs: [],
   spawnFails: false,
+  noTail: false,
 })
 
 const bytes = (text: string) => new TextEncoder().encode(text)
@@ -363,20 +371,28 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
     store.delete(e.key)
     return { value: undefined }
   })
+  // The engine resolves a path that is not absolute on its own host against
+  // the working directory, as a Windows path is on Linux: the end still names
+  // the transcript.
+  const isTranscript = (path: string) => path === disk.path || path.endsWith(disk.path)
   on('fs.read', ($: any, e: any) => {
     disk.reads++
     if (bytes(disk.transcript).length > READ_CAP) return { deny: 'over 4 MiB' }
-    return { value: e.path === '/t/s1.jsonl' ? disk.transcript : '' }
+    return { value: isTranscript(e.path) ? disk.transcript : '' }
   })
   on('fs.stat', ($: any, e: any) => ({
-    value: { kind: 'file', size: e.path === '/t/s1.jsonl' ? bytes(disk.transcript).length : 0, mtimeMs: disk.mtimeMs, isLink: false },
+    value: { kind: 'file', size: isTranscript(e.path) ? bytes(disk.transcript).length : 0, mtimeMs: disk.mtimeMs, isLink: false },
   }))
-  // `tail -c +N path`: the file's bytes from the Nth on, in pieces of a
-  // megabyte or so, as a child's output arrives.
+  // `tail -c +N path`, or PowerShell reading from $env:PROMPT_RAIL_AT: the
+  // file's bytes from there on, in pieces of a megabyte or so, as a child's
+  // output arrives.
   on('process.spawn', async function* ($: any, e: any) {
     disk.spawns.push([...e.argv])
+    disk.spawnEnvs.push(e.env)
     if (disk.spawnFails) throw new Error('no processes here')
-    const from = Number(String(e.argv[2]).slice(1)) - 1
+    if (disk.noTail && e.argv[0] === 'tail') throw new Error("tail failed to start: ENOENT: Command 'tail' not found")
+    const from = e.argv[0] === 'tail' ? Number(String(e.argv[2]).slice(1)) - 1 : Number(e.env?.PROMPT_RAIL_AT)
+    if (!Number.isInteger(from)) throw new Error(`a reader this stub does not know: ${e.argv.join(' ')}`)
     const text = new TextDecoder().decode(bytes(disk.transcript).slice(from))
     for (let i = 0; i < text.length; i += 1 << 20) yield { stream: 'stdout', text: text.slice(i, i + (1 << 20)) }
     return { value: { code: 0, signal: null } }
@@ -525,6 +541,11 @@ test('where no process can run, a large transcript leaves the drawn list and say
   disk.spawnFails = true
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
   await clock.settle()
+  // The engine drops a toast before the session is bound: the warning waits
+  // for session.start.
+  expect(disk.toasts.filter(text => text.includes('too large'))).toHaveLength(0)
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.toasts.filter(text => text.includes('too large'))).toHaveLength(1)
   await drawRow($, 'p2', '二番目のプロンプト')
   disk.mtimeMs = 2
   await stop($)
@@ -533,6 +554,47 @@ test('where no process can run, a large transcript leaves the drawn list and say
   await clock.settle()
   expect(await railLabels($)).toEqual(['二番目のプロンプト'])
   expect(disk.toasts.filter(text => text.includes('too large'))).toHaveLength(1)
+})
+
+test('a large transcript is read with tail, and on Windows, where tail is not a given, PowerShell stands by', () => {
+  expect(streamRequests('/t/s1.jsonl', 0)).toEqual([{ argv: ['tail', '-c', '+1', '/t/s1.jsonl'] }])
+  expect(streamRequests('/t/s1.jsonl', 4096)).toEqual([{ argv: ['tail', '-c', '+4097', '/t/s1.jsonl'] }])
+  const path = "C:\\Users\\o'brien\\.claude\\projects\\s1.jsonl"
+  const [tail, powershell] = streamRequests(path, 4096)
+  expect(tail).toEqual({ argv: ['tail', '-c', '+4097', path] })
+  expect(powershell?.argv.slice(0, 4)).toEqual(['powershell', '-NoProfile', '-NonInteractive', '-Command'])
+  // The path and the position reach the script through its environment, not
+  // its text: a quote in a directory's name, curly or straight, cannot end
+  // the string or run anything.
+  expect(powershell?.env).toEqual({ PROMPT_RAIL_FILE: path, PROMPT_RAIL_AT: '4096' })
+  expect(powershell?.argv[4]).not.toContain('brien')
+  expect(powershell?.argv[4]).toContain("$ErrorActionPreference = 'Stop'")
+  expect(powershell?.argv[4]).toContain("[IO.File]::Open($env:PROMPT_RAIL_FILE, 'Open', 'Read', 'ReadWrite, Delete')")
+  expect(powershell?.argv[4]).toContain('[long]$env:PROMPT_RAIL_AT')
+  expect(powershell?.argv[4]).toMatch(/try \{ .*CopyTo\(\[Console\]::OpenStandardOutput\(\)\) \} finally \{ \$f\.Dispose\(\) \}/)
+  expect(streamRequests('\\\\nas\\home\\s1.jsonl', 0)).toHaveLength(2)
+})
+
+test('on Windows, where tail cannot start, a large transcript is streamed by PowerShell from where tail would have', async ($, on) => {
+  const path = "C:\\Users\\o'brien\\.claude\\projects\\s1.jsonl"
+  const disk = { ...beneath(bigFile(bigRows())), path, noTail: true }
+  world(on, {}, disk.transcript, disk)
+  const clock = mock.clock(on)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: path })
+  await clock.settle()
+  expect(disk.spawns.map(argv => argv[0])).toEqual(['tail', 'powershell'])
+  expect(disk.spawnEnvs[1]).toEqual({ PROMPT_RAIL_FILE: path, PROMPT_RAIL_AT: '0' })
+  expect(disk.toasts).toEqual([])
+  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト'])
+  // A later read asks PowerShell for the bytes after the last row, as it asks tail.
+  const before = bytes(disk.transcript).length
+  const lastRow = bytes(`${JSON.stringify({ parentUuid: 'd1', ...bigRows()[5] })}\n`).length
+  disk.transcript = bigFile(bigRows([{ type: 'user', uuid: 'p3', message: { role: 'user', content: 'third' } }]))
+  disk.mtimeMs = 2
+  await $.classic.Stop({ session_id: 's1', transcript_path: path, stop_hook_active: false })
+  await clock.settle()
+  expect(await railLabels($)).toEqual(['first', '二番目のプロンプト', 'third'])
+  expect(disk.spawnEnvs.at(-1)).toEqual({ PROMPT_RAIL_FILE: path, PROMPT_RAIL_AT: String(before - lastRow) })
 })
 
 test('the session start remembers its transcript under its own key', async ($, on) => {
