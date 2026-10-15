@@ -36,9 +36,11 @@ The layout is also the "Rail mode" row in `/config`, and it is kept across sessi
 
 In the horizontal layout, `ctrl+x tab` moves the focus to the bars: `←` `→` move across them, `Enter` jumps to the prompt, `Esc` returns to the prompt input.
 
-## What it reads, runs, and stores
+## Privacy
 
-prompt-rail makes no network requests and sends nothing anywhere, neither the transcript it reads nor your prompts. Everything it does stays on your machine:
+This section is prompt-rail's privacy policy: what it reads, runs, and stores.
+
+prompt-rail makes no network requests and sends nothing anywhere, neither the transcript it reads nor your prompts. It collects no analytics, and its author receives no data from it. Everything it does stays on your machine:
 
 - It reads the current session's transcript file (the `.jsonl` file Claude Code writes for the session) to list your prompts and their turns.
 - When a transcript is too large to read in one call, it streams the file with `tail -c +N <transcript>`, which writes the file from byte N on to the mod, so the rail reads only what is new. On a Windows path where `tail` cannot start, it runs `powershell -NoProfile -NonInteractive` with a short script that copies the same file from that position. The output of either goes to the mod alone. It runs no other program.
