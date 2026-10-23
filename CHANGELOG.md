@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the rail hiding what other mods draw in the band above the prompt, such as a prompt-cache meter: it drew its own tree there without passing the band on; their lines now stay, above the rail, so the bars keep their place beside the prompt
+
 ## 0.8.0
 
 - Fixed the rail staying empty on Windows for a transcript over 4 MiB (#57): it streamed the file with `tail`, which most Windows sessions do not have on their PATH; where `tail` cannot start, a file on a Windows drive or share is now streamed by PowerShell

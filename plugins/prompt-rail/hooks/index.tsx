@@ -1457,6 +1457,16 @@ export const register: Register = (on, options) => {
     // Nothing while the rail is off, a survey holds the band or a subagent's transcript is in view.
     if (mode === 'off' || e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
+    // Every mod shares the band, and a tree returned here replaces what the
+    // mods after this one draw. Keep theirs, above the rail, so the bars stay
+    // beside the prompt.
+    const below = await next(e)
+    const stack = (rail: ReturnType<typeof Box>) => (
+      <Box flexDirection="column">
+        {below}
+        {rail}
+      </Box>
+    )
     const cards = (width: number) =>
       entries.map((entry, i) => (
         <Box key={`card-${i}`} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
@@ -1522,7 +1532,7 @@ export const register: Register = (on, options) => {
       if (!isCellGrid) {
         // Each bar and mark a cell wide, then a gap.
         const room = width - (isOverflowing ? barCells : entries.length) - 1
-        return (
+        return stack(
           <Box flexDirection="column" paddingLeft={RAIL_INSET}>
             <Box height={1} width={width}>
               {entries.map((_, i) => (
@@ -1538,10 +1548,10 @@ export const register: Register = (on, options) => {
                 <Text dimColor wrap="truncate-end">{label(center, room)}</Text>
               </Box>
             </Box>
-          </Box>
+          </Box>,
         )
       }
-      return (
+      return stack(
         <Box flexDirection="column" paddingLeft={RAIL_INSET}>
           <Box height={1} width={width}>
             {/* With no prompt known on screen, the newest: an empty line reads as a broken rail. */}
@@ -1553,14 +1563,14 @@ export const register: Register = (on, options) => {
             ))}
           </Box>
           <Box flexDirection="row">{bars}</Box>
-        </Box>
+        </Box>,
       )
     }
 
     if (railColumns > 0 && railColumns < INLINE_REVEAL_MIN_COLUMNS) {
-      return <Box flexDirection="column">{cards(Math.max(8, e.props.bodyColumns - 8))}</Box>
+      return stack(<Box flexDirection="column">{cards(Math.max(8, e.props.bodyColumns - 8))}</Box>)
     }
-    return next(e)
+    return below
   })
 
   // The band holds the keyboard after a click or ctrl+x tab: the ring starts
