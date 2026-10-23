@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1
 
 - Fixed the rail hiding what other mods draw in the band above the prompt, such as a prompt-cache meter: it drew its own tree there without passing the band on; their lines now stay, above the rail, so the bars keep their place beside the prompt
 
