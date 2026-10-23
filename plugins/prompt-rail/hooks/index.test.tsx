@@ -54,15 +54,16 @@ test('the terminal dock draws a tick per prompt, other seats draw the text, pres
 
 const BAND = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} }
 
-const drawPrompts = async ($: any, on: any) => {
+const drawPrompts = async ($: any, on: any, below?: string) => {
   on('ui.render', { component: 'UserMessage' }, ($: any, e: any) => {
     const { Text } = $.ui.resolve(e)
     return <Text>{e.props.text}</Text>
   })
-  // Stand in for the engine's empty band when the plugin passes it on.
+  // Stand in for the engine's empty band when the plugin passes it on, or for
+  // the line a mod after this one draws there.
   on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => {
-    const { Box } = $.ui.resolve(e)
-    return <Box />
+    const { Box, Text } = $.ui.resolve(e)
+    return below === undefined ? <Box /> : <Text>{below}</Text>
   })
   mock.store(on)
   on('config.set', ($: any, e: any) => ({ value: e.value }))
@@ -117,6 +118,8 @@ test('with no prompt on screen the text line shows the newest one and no bar is 
     const { Text } = $.ui.resolve(e)
     return <Text>{e.props.text}</Text>
   })
+  // Stand in for the engine's empty band when the plugin passes it on.
+  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => $.ui.resolve(e).Box({}))
   mock.store(on)
   on('config.set', ($: any, e: any) => ({ value: e.value }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -223,6 +226,28 @@ test('on the desktop the bars leave room beside them for the prompt being read',
   // The bars, their marks, a gap and the label fit the band's width, inset aside.
   expect(bars + marks + 1 + [...String(label.text)].length).toBeLessThanOrEqual(bodyColumns - 2 - 2)
   expect(String(label.text)).toMatch(/^#2 second/)
+})
+
+test('the band keeps what the mods after it draw, above the rail', async ($, on) => {
+  await drawPrompts($, on, 'cache 98% · 3:41')
+  const isBelow = (node: any) => node.type === 'Text' && node.text === 'cache 98% · 3:41'
+  const isRail = (node: any) => node.type === 'Button' || node.props?.key === 'card-0'
+  const expectBelowAboveRail = async (band: any) => {
+    const drawn = await band.findAll({})
+    expect(drawn.findIndex(isRail)).toBeGreaterThanOrEqual(0)
+    expect(drawn.findIndex(isBelow)).toBeGreaterThanOrEqual(0)
+    expect(drawn.findIndex(isBelow)).toBeLessThan(drawn.findIndex(isRail))
+  }
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  for (const surface of SURFACES) {
+    const band = await $.ui.mount({ plugin: 'prompt-rail', surface, component: 'AbovePrompt', props: BAND })
+    await expectBelowAboveRail(band)
+    await band.unmount()
+  }
+  // A vertical rail too narrow to reveal beside its ticks keeps hidden cards in the band.
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 4) })
+  await expectBelowAboveRail(await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND }))
 })
 
 test('a command names a prompt by number, first, last or the words it holds', () => {
@@ -1136,6 +1161,8 @@ test('/prompt-rail <mode> still switches when the setting has no /config row', a
     const { Text } = $.ui.resolve(e)
     return <Text>{e.props.text}</Text>
   })
+  // Stand in for the engine's empty band when the plugin passes it on.
+  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => $.ui.resolve(e).Box({}))
   mock.store(on)
   on('session.id', () => ({ value: 's1' }))
   on('config.set', () => {
