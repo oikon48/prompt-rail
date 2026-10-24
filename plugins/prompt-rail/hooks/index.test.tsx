@@ -947,6 +947,69 @@ test('a delivered prompt drawn before the transcript is read is listed once afte
   expect(await railLabels($)).toEqual(['first', 'mid'])
 })
 
+// Messages no person typed, stored as 2.1.310 stores them: each with its
+// origin, a peer's meta, and in the words the engine frames it with.
+const PEER_TAG = '<cross-session-message from="bridge:session_01" from-name="gpubox" from-mode="prompting">'
+const RELAY = '<relay from="coordinator" session="session_02" current-time="2026-10-10T00:52:37Z">\n  <note>start</note>\n</relay>'
+const queued = (uuid: string, prompt: string, more: Record<string, unknown> = {}) => ({
+  type: 'attachment',
+  uuid,
+  attachment: { type: 'queued_command', prompt, commandMode: 'prompt', ...more },
+})
+const ORIGINS = [
+  { type: 'user', uuid: 's1', origin: { kind: 'human' }, message: { role: 'user', content: 'first' } },
+  { type: 'assistant', uuid: 'b1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } },
+  { type: 'user', uuid: 'r1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: '' }] } },
+  queued('a1', `${PEER_TAG}\nREADME pushed\n</cross-session-message>`, { origin: { kind: 'peer', name: 'gpubox' }, isMeta: true }),
+  queued('a2', '<agent-message from="a63">\n[Subagent hand-back] done\n</agent-message>', { origin: { kind: 'peer', handback: true }, isMeta: true }),
+  queued('a3', RELAY, { origin: { kind: 'task-notification', subkind: 'projects-relay' } }),
+  queued('a4', 'Goal set: open the PR', { origin: { kind: 'auto-continuation' } }),
+  queued('a5', 'mid', { origin: { kind: 'human' } }),
+  { type: 'assistant', uuid: 'b2', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
+  {
+    type: 'user',
+    uuid: 'p1',
+    isMeta: true,
+    origin: { kind: 'peer', name: 'gpubox' },
+    message: { role: 'user', content: `Another Claude session sent a message:\n${PEER_TAG}\nnext step\n</cross-session-message>` },
+  },
+  { type: 'assistant', uuid: 'b3', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  { type: 'user', uuid: 'p2', origin: { kind: 'task-notification', subkind: 'projects-relay' }, message: { role: 'user', content: RELAY } },
+  { type: 'assistant', uuid: 'b4', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  { type: 'user', uuid: 'p3', origin: { kind: 'plugin', name: 'vcr-spike', asUser: true }, message: { role: 'user', content: 'Read target.txt' } },
+  { type: 'assistant', uuid: 'b5', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  { type: 'user', uuid: 's2', origin: { kind: 'human' }, message: { role: 'user', content: 'last' } },
+]
+
+test('messages from other sessions, agents, relays and plugins are left out of the stored prompts', async ($, on) => {
+  queueWorld(on, jsonl(ORIGINS))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['first', 'mid', 'last'])
+})
+
+// The same messages as builds up to 2.1.304 stored some of them: a user row
+// with no origin and no meta, which only the engine's framing tells apart.
+const UNSTAMPED = [
+  { type: 'user', uuid: 's1', message: { role: 'user', content: 'first' } },
+  { type: 'assistant', uuid: 'b1', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  {
+    type: 'user',
+    uuid: 'p1',
+    message: { role: 'user', content: 'Another Claude session sent a message:\n<teammate-message teammate_id="readA04" summary="done 12">\ndone 12\n</teammate-message>' },
+  },
+  { type: 'assistant', uuid: 'b2', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  queued('a1', `${PEER_TAG}\nREADME pushed\n</cross-session-message>`),
+  queued('a2', RELAY),
+  { type: 'assistant', uuid: 'b3', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  { type: 'user', uuid: 's2', message: { role: 'user', content: 'quote Another Claude session sent' } },
+]
+
+test('messages from other sessions stored with no origin are told apart by their framing', async ($, on) => {
+  queueWorld(on, jsonl(UNSTAMPED))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  expect(await railLabels($)).toEqual(['first', 'quote Another Claude session sent'])
+})
+
 test('what the engine reported of a turn goes to the prompt that started it, not one delivered into it', async ($, on) => {
   queueWorld(on)
   await $.command.run({ command: 'prompt-rail', args: 'horizontal' })

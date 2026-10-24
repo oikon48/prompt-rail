@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the rail listing messages no person typed as prompts once it read the transcript, such as another Claude session's message, a subagent's hand-back, a teammate's or coordinator's message, a plugin's prompt or a follow-up the engine sends on its own: the rows drawn live were already left out, but the transcript read went by the text alone; it now leaves out what the engine marks as another's (its origin, or meta), and the engine's framing of such messages where older builds marked nothing
+
 ## 0.8.1
 
 - Fixed the rail hiding what other mods draw in the band above the prompt, such as a prompt-cache meter: it drew its own tree there without passing the band on; their lines now stay, above the rail, so the bars keep their place beside the prompt

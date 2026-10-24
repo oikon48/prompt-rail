@@ -32,8 +32,22 @@ const KEPT_TRANSCRIPTS = 20
 // row follows under its uuid.
 const PROVISIONAL_ID = 'placeholder'
 // User rows the engine writes around its own output (slash commands, bash
-// mode, reminders), which are not prompts.
-const WRAPPER = /^<(command-|local-command-|bash-|system-reminder|task-notification|user-prompt-submit-hook)/
+// mode, reminders) or around another agent's message (a peer session, a
+// subagent's hand-back, a teammate, a coordinator's relay), which are not
+// prompts. Builds up to 2.1.304 stored some of the messages with no origin,
+// so only this framing tells them apart.
+const WRAPPER =
+  /^(<(command-|local-command-|bash-|system-reminder|task-notification|user-prompt-submit-hook|cross-session-message|agent-message|teammate-message|relay\b)|Another Claude session sent a message)/
+// Origins the transcript stores on a row no person typed: another session or
+// agent, a background task or relay, the engine's own follow-up, a plugin's
+// prompt. The file names them apart from the hooks (a typed prompt is
+// `human`, not `composer`, and a Remote Control one is unseen), so the rows
+// to leave out are named rather than PROMPT_KINDS kept.
+const OTHER_ORIGINS = new Set(['peer', 'task-notification', 'auto-continuation', 'plugin'])
+// Whether a stored row, or a queued_command attachment, is no person's prompt
+// by how the engine marked it.
+const isOthers = (marked: { isMeta?: unknown; origin?: { kind?: unknown } } | undefined) =>
+  marked?.isMeta === true || OTHER_ORIGINS.has(String(marked?.origin?.kind))
 // The viewer's state the engine puts ahead of a prompt sent while an artifact
 // is open; the typed text follows it. No row field tells it from typed text,
 // so only the engine's layout matches: the artifact id, a JSON line starting
@@ -298,9 +312,18 @@ const parseRow = (line: string): any => {
     isApiErrorMessage: row.isApiErrorMessage,
     isMeta: row.isMeta,
     isCompactSummary: row.isCompactSummary,
+    origin: row.origin && { kind: row.origin.kind },
     timestamp: row.timestamp,
     message: row.message && { role: row.message.role, content: typeof content === 'string' ? content : blocks },
-    attachment: row.attachment?.type === 'queued_command' ? { type: row.attachment.type, prompt: row.attachment.prompt } : undefined,
+    attachment:
+      row.attachment?.type === 'queued_command'
+        ? {
+            type: row.attachment.type,
+            prompt: row.attachment.prompt,
+            isMeta: row.attachment.isMeta,
+            origin: row.attachment.origin && { kind: row.attachment.origin.kind },
+          }
+        : undefined,
   }
 }
 
@@ -347,8 +370,10 @@ const indexRows = (rows: any[]): TranscriptIndex => {
       continue
     }
     // A prompt typed while a turn ran and delivered into it is stored as a
-    // queued_command attachment, never as a user row of its own.
+    // queued_command attachment, never as a user row of its own; so is another
+    // agent's message delivered into it.
     if (row.type === 'attachment' && row.attachment?.type === 'queued_command') {
+      if (isOthers(row.attachment)) continue
       const prompt = row.attachment.prompt
       const text = typeof prompt === 'string' ? prompt.replace(VIEW_CONTEXT, '').trim() : ''
       if (!text || WRAPPER.test(text) || text.startsWith('/')) continue
@@ -357,7 +382,7 @@ const indexRows = (rows: any[]): TranscriptIndex => {
       times.push({ start: NaN, last: NaN })
       continue
     }
-    if (row.type !== 'user' || row.isMeta || row.isCompactSummary || row.message?.role !== 'user') continue
+    if (row.type !== 'user' || isOthers(row) || row.isCompactSummary || row.message?.role !== 'user') continue
     const content = row.message.content
     let text = ''
     if (typeof content === 'string') {
