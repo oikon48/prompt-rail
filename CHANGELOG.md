@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.2
 
 - Fixed the rail missing earlier prompts and turn details on a machine with managed settings or in a Team or Enterprise organization (#69): Claude Code's security default keeps the classic hooks from installed plugins there, and the rail learned the transcript's path from them alone; it now finds the file where Claude Code keeps it, reads it again as each turn ends, starts its list over on a `/clear` or resume, and says once when no transcript can be found
 - Fixed the rail listing messages no person typed as prompts once it read the transcript, such as another Claude session's message, a subagent's hand-back, a teammate's or coordinator's message, a plugin's prompt or a follow-up the engine sends on its own: the rows drawn live were already left out, but the transcript read went by the text alone; it now leaves out what the engine marks as another's (its origin, or meta), and the engine's framing of such messages where older builds marked nothing
