@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, drawnRow, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, streamRequests, tick, turnLine } from './index.tsx'
+import { bar, configDirOf, drawnRow, findTranscript, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, streamRequests, tick, transcriptCandidates, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -358,6 +358,10 @@ type Beneath = {
   spawnEnvs: (Record<string, string> | undefined)[]
   spawnFails: boolean
   noTail: boolean
+  // The session's id ($.session.id()), and whether the transcript is not
+  // written yet (a fresh session's file comes with its first prompt).
+  sessionId: string
+  isMissing: boolean
 }
 const beneath = (transcript = TRANSCRIPT): Beneath => ({
   transcript,
@@ -376,6 +380,8 @@ const beneath = (transcript = TRANSCRIPT): Beneath => ({
   spawnEnvs: [],
   spawnFails: false,
   noTail: false,
+  sessionId: 's1',
+  isMissing: false,
 })
 
 const bytes = (text: string) => new TextEncoder().encode(text)
@@ -405,9 +411,11 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
     if (bytes(disk.transcript).length > READ_CAP) return { deny: 'over 4 MiB' }
     return { value: isTranscript(e.path) ? disk.transcript : '' }
   })
-  on('fs.stat', ($: any, e: any) => ({
-    value: { kind: 'file', size: isTranscript(e.path) ? bytes(disk.transcript).length : 0, mtimeMs: disk.mtimeMs, isLink: false },
-  }))
+  on('fs.stat', ($: any, e: any) =>
+    disk.isMissing && isTranscript(e.path)
+      ? { deny: `ENOENT: no such file or directory, lstat '${e.path}'` }
+      : { value: { kind: 'file', size: isTranscript(e.path) ? bytes(disk.transcript).length : 0, mtimeMs: disk.mtimeMs, isLink: false } },
+  )
   // `tail -c +N path`, or PowerShell reading from $env:PROMPT_RAIL_AT: the
   // file's bytes from there on, in pieces of a megabyte or so, as a child's
   // output arrives.
@@ -430,7 +438,7 @@ const world = (on: any, initial: Record<string, unknown> = {}, transcript = TRAN
     disk.railRedraws++
     return next(e)
   })
-  on('session.id', () => ({ value: 's1' }))
+  on('session.id', () => ({ value: disk.sessionId }))
   on('classic.SessionStart', () => ({}))
   on('classic.Stop', () => ({}))
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
@@ -637,6 +645,179 @@ test('a reload lists the prompts again from the remembered transcript', async ($
   await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
   const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   expect((await band.findAll({ type: 'Button' })).length).toBe(4)
+})
+
+// Under a security default seated above the plugins a person installs, the
+// classic hooks that name the transcript are passed over: the rail finds the
+// file where the engine files it, under the config folder its own install
+// sits in.
+test('the config folder is the one a marketplace install sits under, in its own spelling', () => {
+  expect(configDirOf('/Users/me/.claude/plugins/cache/oikon48/prompt-rail/0.8.2')).toEqual({ dir: '/Users/me/.claude', sep: '/' })
+  // CLAUDE_CONFIG_DIR moves the plugins with it.
+  expect(configDirOf('/opt/cc/plugins/cache/oikon48/prompt-rail/0.8.2')).toEqual({ dir: '/opt/cc', sep: '/' })
+  expect(configDirOf('C:\\Users\\me\\.claude\\plugins\\cache\\oikon48\\prompt-rail\\0.8.2')).toEqual({ dir: 'C:\\Users\\me\\.claude', sep: '\\' })
+  // Loaded from a folder of its own (--plugin-dir): no config folder to look under.
+  expect(configDirOf('/Users/me/src/prompt-rail/plugins/prompt-rail')).toBeUndefined()
+})
+
+test('a transcript is looked for under the project folder named after the working directory', () => {
+  const posix = { dir: '/Users/me/.claude', sep: '/' }
+  expect(transcriptCandidates(posix, '/Users/me/src/github.com/me/my_app', 's1')).toEqual(['/Users/me/.claude/projects/-Users-me-src-github-com-me-my-app/s1.jsonl'])
+  const windows = { dir: 'C:\\Users\\me\\.claude', sep: '\\' }
+  expect(transcriptCandidates(windows, 'C:\\Users\\me\\app', 's1')).toEqual(['C:\\Users\\me\\.claude\\projects\\C--Users-me-app\\s1.jsonl'])
+})
+
+test('a project folder name over 200 characters is matched by its cut, the engine adding a hash after it', () => {
+  const posix = { dir: '/h/.claude', sep: '/' }
+  const long = `/w/${'a'.repeat(240)}`
+  const cut = `-w-${'a'.repeat(197)}`
+  // The hash is the engine's own: with no folders listed, nothing to name.
+  expect(transcriptCandidates(posix, long, 's1')).toEqual([])
+  expect(transcriptCandidates(posix, long, 's1', [`${cut}-k3j9`, `${cut}a-x`, 'other', `${cut}-z1`])).toEqual([
+    `/h/.claude/projects/${cut}-k3j9/s1.jsonl`,
+    `/h/.claude/projects/${cut}-z1/s1.jsonl`,
+  ])
+})
+
+// The disk findTranscript probes: the session's directories, the files that
+// exist, and the folders under the config folder's `projects`. Each probe of
+// a file is recorded.
+const CONFIG_ROOT = '/h/.claude/plugins/cache/oikon48/prompt-rail/0.8.2'
+const PROJECTS = '/h/.claude/projects'
+type ProbeDisk = { files?: string[]; folders?: string[]; cwd?: string; root?: string }
+const probeOf = ({ files = [], folders = [], cwd = '/w/app', root = cwd }: ProbeDisk = {}) => {
+  const probes: string[] = []
+  const probe = {
+    dirs: async () => [cwd, root],
+    exists: async (path: string) => {
+      probes.push(path)
+      return files.includes(path)
+    },
+    folders: async (path: string) => (path === PROJECTS ? folders : []),
+  }
+  return { probe, probes }
+}
+
+test('a transcript on disk is found under the folder of the directory the session started in', async () => {
+  const { probe } = probeOf({ files: [`${PROJECTS}/-w-app/s1.jsonl`] })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-app/s1.jsonl`)
+})
+
+test('a session that moved is found under the folder of the directory it is in now', async () => {
+  const { probe } = probeOf({ files: [`${PROJECTS}/-w-other/s1.jsonl`], cwd: '/w/other' })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-other/s1.jsonl`)
+})
+
+test("a fresh session's transcript, not written yet, is taken where its starting directory files it", async () => {
+  const { probe, probes } = probeOf({ cwd: '/w/other', root: '/w' })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-app/s1.jsonl`)
+  expect(probes).toEqual([`${PROJECTS}/-w-app/s1.jsonl`, `${PROJECTS}/-w-other/s1.jsonl`, `${PROJECTS}/-w/s1.jsonl`])
+})
+
+test('a folder name the engine cut is found among the projects folders that start with its cut', async () => {
+  const long = `/w/${'a'.repeat(240)}`
+  const cut = `-w-${'a'.repeat(197)}`
+  const { probe } = probeOf({ files: [`${PROJECTS}/${cut}-z1/s1.jsonl`], folders: [`${cut}-k3j9`, 'other', `${cut}-z1`], cwd: long })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', long)).toBe(`${PROJECTS}/${cut}-z1/s1.jsonl`)
+})
+
+test('a cut folder name no transcript is under yet gives no path to keep', async () => {
+  const long = `/w/${'a'.repeat(240)}`
+  const cut = `-w-${'a'.repeat(197)}`
+  const { probe } = probeOf({ folders: [`${cut}-k3j9`], cwd: long })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', long)).toBeUndefined()
+})
+
+test('a session whose directories cannot be read is looked for under the one it started in', async () => {
+  const { probe } = probeOf({ files: [`${PROJECTS}/-w-app/s1.jsonl`] })
+  probe.dirs = () => Promise.reject(new Error('no session here'))
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-app/s1.jsonl`)
+})
+
+test('a plugin not installed from a marketplace looks for no transcript', async () => {
+  const { probe, probes } = probeOf({ files: [`${PROJECTS}/-w-app/s1.jsonl`] })
+  expect(await findTranscript(probe, '/w/src/prompt-rail/plugins/prompt-rail', 's1', '/w/app')).toBeUndefined()
+  expect(probes).toEqual([])
+})
+
+// A session whose classic hooks are passed over: the store's remembered path
+// stands in for the one found where the engine files it, which a test's
+// plugin root (not under a config folder) cannot find.
+const unclassicWorld = (on: any, initial: Record<string, unknown> = { 'transcript:s1': { path: '/t/s1.jsonl', at: 1 } }) => {
+  const disk = beneath()
+  world(on, initial, disk.transcript, disk)
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  on('prompt.submit', ($: any, e: any) => ({ text: e.text }))
+  on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
+  mock.clock(on)
+  return disk
+}
+const startSession = ($: any) => $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+const STORED = ['first stored prompt', '<div> why does this overflow?', 'continue', 'continue']
+const endTurn = ($: any, turnId: string) => $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId, reason: 'answer' })
+
+test('a transcript not written yet when the session starts is read once a turn starts', async ($, on) => {
+  const disk = unclassicWorld(on)
+  disk.isMissing = true
+  await startSession($)
+  expect(await railLabels($)).toEqual([])
+  disk.isMissing = false
+  await $.turn.start({ text: 'continue', turnId: 't1' })
+  expect(await railLabels($)).toEqual(STORED)
+})
+
+test('a turn that ends reads the transcript again without the classic Stop hook', async ($, on) => {
+  const disk = unclassicWorld(on)
+  await startSession($)
+  await $.turn.start({ text: 'one more', turnId: 't1' })
+  disk.transcript = `${TRANSCRIPT}\n${JSON.stringify({ parentUuid: 'u4', type: 'user', uuid: 'u5', message: { role: 'user', content: 'one more' } })}`
+  disk.mtimeMs = 2
+  await endTurn($, 't1')
+  expect(await railLabels($)).toEqual([...STORED, 'one more'])
+})
+
+test('a /clear the classic hooks did not tell of starts the list over', async ($, on) => {
+  const disk = unclassicWorld(on)
+  await startSession($)
+  expect(await railLabels($)).toEqual(STORED)
+  disk.sessionId = 's2'
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  expect(await railLabels($)).toEqual([])
+  await submit($, 'a fresh start')
+  await drawRow($, 'placeholder', 'a fresh start')
+  await $.turn.start({ text: 'a fresh start', turnId: 't1' })
+  await drawRow($, 'n1', 'a fresh start')
+  expect(await railLabels($)).toEqual(['a fresh start'])
+})
+
+test('a session id that changed under the rail starts the list over at the next turn', async ($, on) => {
+  const disk = unclassicWorld(on)
+  await startSession($)
+  disk.sessionId = 's2'
+  await $.turn.start({ text: 'elsewhere', turnId: 't1' })
+  expect(await railLabels($)).toEqual([])
+})
+
+test('a session whose transcript cannot be found says so once, and lists prompts as they are drawn', async ($, on) => {
+  const disk = unclassicWorld(on, {})
+  await startSession($)
+  await $.turn.start({ text: 'first', turnId: 't1' })
+  await drawRow($, 'n1', 'first')
+  await endTurn($, 't1')
+  await $.turn.start({ text: 'second', turnId: 't2' })
+  await drawRow($, 'n2', 'second')
+  expect(await railLabels($)).toEqual(['first', 'second'])
+  expect(disk.toasts.filter(text => text.includes('transcript'))).toEqual(["this session's transcript could not be found; prompts are listed as they are drawn"])
+})
+
+test('a transcript the classic hooks name is not doubted, and nothing is said', async ($, on) => {
+  const disk = unclassicWorld(on, {})
+  await startSession($)
+  await $.classic.SessionStart({ source: 'startup', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.turn.start({ text: 'continue', turnId: 't1' })
+  expect(await railLabels($)).toEqual(STORED)
+  expect(disk.toasts).toEqual([])
 })
 
 test('prompts are listed in transcript order, wrappers left out, repeats kept', async ($, on) => {

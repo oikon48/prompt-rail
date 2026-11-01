@@ -43,6 +43,7 @@ This section is prompt-rail's privacy policy: what it reads, runs, and stores.
 prompt-rail makes no network requests and sends nothing anywhere, neither the transcript it reads nor your prompts. It collects no analytics, and its author receives no data from it. Everything it does stays on your machine:
 
 - It reads the current session's transcript file (the `.jsonl` file Claude Code writes for the session) to list your prompts and their turns.
+- Where no hook names that file, as on a machine with managed settings or in a Team or Enterprise organization, where Claude Code's security default keeps the classic hooks from installed plugins, it looks for the file where Claude Code keeps it: `projects/<folder>/<session id>.jsonl` under the config folder the mod is installed in, the folder named after the session's working directory. It checks whether that file exists, and for a working directory whose folder name Claude Code shortens, it lists the folder names under `projects` to find the one that matches. It reads no other file there.
 - When a transcript is too large to read in one call, it streams the file with `tail -c +N <transcript>`, which writes the file from byte N on to the mod, so the rail reads only what is new. On a Windows path where `tail` cannot start, it runs `powershell -NoProfile -NonInteractive` with a short script that copies the same file from that position. The output of either goes to the mod alone. It runs no other program.
 - It writes one setting, its own `prompt-rail.mode` (the "Rail mode" row in `/config`), when you pick a layout. It sets no other setting and no environment variable.
 - In the mod's own store it keeps the layout last on and the transcript paths of the most recent sessions, so a resumed session can find its rail again.
@@ -51,8 +52,9 @@ Its hooks watch and do not change what passes through them:
 
 - `command.run` answers only its own commands (`/prompt-rail`, `/prompt-rail-next`, `/prompt-rail-prev`, `/prompt-rail-toggle`) and passes every other command on unchanged.
 - `classic.SessionStart` and `classic.Stop` read the transcript path from the event to refresh the rail, and pass the event on unchanged; the rail adds no context or instructions.
+- `session.end` notes that a `/clear` or a resume has started another conversation, so the rail starts its list over, and passes the event on unchanged.
 - `prompt.submit` and `session.receive` note that a prompt was sent, and pass it on unchanged.
-- `turn.start`, `turn.complete`, and `ui.render` on transcript rows note which prompt is on screen and which turn is running, and draw those rows as Claude Code does. `ui.render`, `ui.focus`, and `ui.press` on the rail's own pane and band draw the rail and take its clicks and keys.
+- `turn.start`, `turn.complete`, and `ui.render` on transcript rows note which prompt is on screen and which turn is running, read the transcript again as a turn starts and ends, and draw those rows as Claude Code does. `ui.render`, `ui.focus`, and `ui.press` on the rail's own pane and band draw the rail and take its clicks and keys.
 
 ## Limitations
 

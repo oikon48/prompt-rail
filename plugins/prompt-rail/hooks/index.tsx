@@ -28,6 +28,9 @@ const LAST_ON_KEY = 'last-on'
 // sessions starting together never rewrite each other's; the newest few stay.
 const TRANSCRIPT_KEY_PREFIX = 'transcript:'
 const KEPT_TRANSCRIPTS = 20
+// The longest project folder name the engine files transcripts under before
+// it cuts the name and adds a hash (see transcriptCandidates).
+const PROJECT_FOLDER_MAX = 200
 // The id a prompt row is drawn under before its message is stored; the stored
 // row follows under its uuid.
 const PROVISIONAL_ID = 'placeholder'
@@ -76,6 +79,9 @@ const NOT_DRAWN = /nothing drawn/
 // The engine's refusal where no transcript viewport takes a plugin's scroll,
 // as in the desktop app; said once, in words of the rail's own.
 const UNSCROLLABLE = /not scrollable/
+// Said once a conversation when no hook named its transcript and none was
+// found on disk (see findTranscript).
+const UNFOUND = "this session's transcript could not be found; prompts are listed as they are drawn"
 const UNSCROLLABLE_TOAST = 'jumps cannot land here: this view does not let a plugin scroll the transcript'
 // A count the rail's sites (the pane and the band) read while drawing, so
 // bumping it draws them again, and them alone. `$.ui.invalidate('ui.render')`
@@ -634,6 +640,32 @@ async function rememberTranscript($: EngineInterface, sessionId: string, transcr
   await Promise.all(dated.slice(KEPT_TRANSCRIPTS).map(({ key }) => $.store.delete(key)))
 }
 
+// The config folder a plugin installed from a marketplace sits under
+// (`<dir>/plugins/cache/<marketplace>/<plugin>/<version>`, CLAUDE_CONFIG_DIR
+// included) and the separator its path is spelled with; undefined for a plugin
+// loaded from a folder of its own (--plugin-dir).
+export function configDirOf(root: string): { dir: string; sep: string } | undefined {
+  for (const sep of ['/', '\\']) {
+    const at = root.lastIndexOf(`${sep}plugins${sep}cache${sep}`)
+    if (at > 0) return { dir: root.slice(0, at), sep }
+  }
+  return undefined
+}
+
+// Where the engine files a session's transcript: `<config>/projects/<folder>/
+// <session id>.jsonl`, the folder the working directory with every character
+// but a letter or digit made `-`. A folder name over PROJECT_FOLDER_MAX
+// characters is cut there and followed by `-` and a hash of the engine's own,
+// so it is matched among `folders` (the projects folder's entries) by its cut;
+// with none given, it has no candidate.
+export function transcriptCandidates(config: { dir: string; sep: string }, cwd: string, id: string, folders: readonly string[] = []) {
+  const at = (folder: string) => [config.dir, 'projects', folder, `${id}.jsonl`].join(config.sep)
+  const folder = cwd.replace(/[^a-zA-Z0-9]/g, '-')
+  if (folder.length <= PROJECT_FOLDER_MAX) return [at(folder)]
+  const cut = `${folder.slice(0, PROJECT_FOLDER_MAX)}-`
+  return folders.filter(name => name.startsWith(cut)).map(at)
+}
+
 // Open the pane where the mode draws the rail in it; close it elsewhere (off,
 // or horizontal on the terminal, where the band carries the rail).
 async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
@@ -729,6 +761,52 @@ async function rememberedTranscript($: EngineInterface) {
   return typeof value?.path === 'string' ? value.path : undefined
 }
 
+// This session's transcript where the engine files it (see
+// transcriptCandidates), for the directory the session started in or the one
+// it is in now: the first candidate the disk holds, else the one for the
+// starting directory, which a fresh session writes with its first prompt.
+// Undefined for a plugin not installed from a marketplace (its `root`, see
+// configDirOf), whose config folder is not known, and for a folder name the
+// engine cut that no folder on disk matches yet.
+export async function findTranscript(probe: Probe, root: string, id: string, launchCwd: string | undefined) {
+  const config = configDirOf(root)
+  if (config === undefined) return undefined
+  const now = await probe.dirs().catch(() => [])
+  const cwds = [...new Set([launchCwd, ...now].filter((cwd): cwd is string => cwd !== undefined))]
+  let folders: readonly string[] | undefined
+  const found: string[] = []
+  for (const cwd of cwds) {
+    let candidates = transcriptCandidates(config, cwd, id)
+    if (candidates.length === 0) {
+      folders ??= await probe.folders([config.dir, 'projects'].join(config.sep)).catch(() => [])
+      candidates = transcriptCandidates(config, cwd, id, folders)
+    }
+    found.push(...candidates)
+  }
+  for (const path of found) if (await probe.exists(path).catch(() => false)) return path
+  return cwds[0] === undefined ? undefined : transcriptCandidates(config, cwds[0], id)[0]
+}
+
+// What findTranscript reads of the session and the disk: the directories the
+// session is in now (where it runs, its project root), whether a file exists,
+// and the names of the folders in a folder.
+export type Probe = {
+  dirs: () => Promise<readonly string[]>
+  exists: (path: string) => Promise<boolean>
+  folders: (path: string) => Promise<readonly string[]>
+}
+
+// The transcript path a classic SessionStart remembered for this session, or
+// else the one found on disk: with the classic hooks passed over, the only one.
+async function transcriptOf($: EngineInterface, id: string, launchCwd: string | undefined) {
+  const probe: Probe = {
+    dirs: async () => [await $.session.cwd(), await $.session.root()],
+    exists: path => $.fs.exists(path),
+    folders: async path => (await $.fs.list(path)).filter(entry => entry.kind === 'dir').map(entry => entry.name),
+  }
+  return (await rememberedTranscript($)) ?? (await findTranscript(probe, $.plugin.root, id, launchCwd))
+}
+
 export const register: Register = (on, options) => {
   let entries: Entry[] = []
   // Assistant row key -> the key of the prompt it answers, from the transcript.
@@ -802,6 +880,16 @@ export const register: Register = (on, options) => {
   const seen: Seen = unseen()
   // Whether session.start has run; before it a toast is dropped (see tellNotice).
   let isBound = false
+  // The conversation the list is of: its session id, and its transcript's
+  // path once known, the one classic.SessionStart names or else the one
+  // findTranscript finds. A security default seated above the plugins a
+  // person installs (on a machine with managed settings, or for a Team or
+  // Enterprise organization) passes the classic hooks over, and then the path
+  // found is the only one. The session id this session last said it could not
+  // find a transcript for, and the directory it started in.
+  let session: { id: string; path?: string } | undefined
+  let unfoundFor: string | undefined
+  let launchCwd: string | undefined
   // Row key -> the id a prompt's row was last drawn under (see drawnRow).
   const drawn = new Map<string, string>()
   // The ids of the prompts the last transcript read listed.
@@ -1083,6 +1171,44 @@ export const register: Register = (on, options) => {
     ringed = undefined
   }
 
+  // Start the list over for another conversation (a /clear, a resume).
+  const forget = () => {
+    entries = []
+    owners = new Map()
+    turns = new Map()
+    reported.clear()
+    ended.clear()
+    isRunning = false
+    onScreen.clear()
+    landed = undefined
+    reading = undefined
+    drawnCurrent = -1
+    unreachable.clear()
+    notices.isUnscrollableSaid = false
+    drawn.clear()
+    filed = new Set()
+    pending.clear()
+    aliases.clear()
+    waiting.clear()
+    provisional = undefined
+    lately = []
+    turnText = ''
+    starter = undefined
+    notifiedAt.clear()
+    delivered.clear()
+    Object.assign(seen, unseen())
+    listedAtRest = 0
+    session = undefined
+  }
+
+  // Whether the session is in another conversation than the list is of (a
+  // /clear or resume no hook told of); if so, the list starts over.
+  const isElsewhere = (id: string) => {
+    if (session === undefined || session.id === id) return false
+    forget()
+    return true
+  }
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       // Named after the plugin: a plugin's commands share one namespace with
@@ -1119,8 +1245,13 @@ export const register: Register = (on, options) => {
     const kept = await $.store.get(`${SESSION_MODE_KEY_PREFIX}${await $.session.id()}`)
     if (isMode(kept)) mode = kept
     // Also fired after a hot reload, when the list starts empty: rebuild it from
-    // the transcript this session's classic SessionStart remembered.
-    const transcriptPath = await rememberedTranscript($)
+    // the transcript this session's classic SessionStart remembered, or, with
+    // the classic hooks passed over, the one found on disk.
+    launchCwd = e.cwd
+    const id = await $.session.id()
+    if (isElsewhere(id)) await redrawRail($)
+    if (session?.path === undefined) session = { id, path: await transcriptOf($, id, launchCwd) }
+    const transcriptPath = session.path
     const index = transcriptPath === undefined ? undefined : await readTranscript($, transcriptPath, seen, index => {
       if (index && merge(index)) void redrawRail($)
       tellNotice($, seen, isBound)
@@ -1236,32 +1367,12 @@ export const register: Register = (on, options) => {
 
   on('classic.SessionStart', async ($, e, next) => {
     if (e.source === 'clear') {
-      entries = []
-      owners = new Map()
-      turns = new Map()
-      reported.clear()
-      ended.clear()
-      isRunning = false
-      onScreen.clear()
-      landed = undefined
-      reading = undefined
-      drawnCurrent = -1
-      unreachable.clear()
-      notices.isUnscrollableSaid = false
-      drawn.clear()
-      filed = new Set()
-      pending.clear()
-      aliases.clear()
-      waiting.clear()
-      provisional = undefined
-      lately = []
-      turnText = ''
-      starter = undefined
-      notifiedAt.clear()
-      delivered.clear()
-      Object.assign(seen, unseen())
+      forget()
+      session = { id: e.session_id, path: e.transcript_path }
       await redrawRail($)
     } else {
+      // The path named here outranks one found on disk.
+      session = { id: e.session_id, path: e.transcript_path }
       const index = await readTranscript($, e.transcript_path, seen, index => {
         if (index && merge(index)) void redrawRail($)
         tellNotice($, seen, isBound)
@@ -1287,6 +1398,15 @@ export const register: Register = (on, options) => {
   // A main-loop turn starts (a subagent's run raises none): the newest
   // prompt's turn is running.
   on('turn.start', async ($, e, next) => {
+    // First, as it may start the list over: the conversation this turn is in.
+    const id = await $.session.id()
+    if (isElsewhere(id)) await redrawRail($)
+    if (session?.path === undefined) session = { id, path: await transcriptOf($, id, launchCwd) }
+    const path = session.path
+    if (path === undefined && unfoundFor !== id) {
+      unfoundFor = id
+      $.ui.toast(UNFOUND)
+    }
     isRunning = true
     // The transcript follows the new turn down from the prompt jumped to.
     landed = undefined
@@ -1296,8 +1416,8 @@ export const register: Register = (on, options) => {
     lately = []
     // Every row of the turns before is stored by now: read them, so a row the
     // index does not know can only be this turn's (see currentIndex).
-    const index = seen.path
-      ? await readTranscript($, seen.path, seen, index => {
+    const index = path
+      ? await readTranscript($, path, seen, index => {
           if (index && merge(index)) void redrawRail($)
           tellNotice($, seen, isBound)
         })
@@ -1338,9 +1458,31 @@ export const register: Register = (on, options) => {
         if (e.reason === 'aborted') ended.set(key, 'interrupted')
         if (e.reason === 'error') ended.set(key, 'error')
       }
+      // The turn's rows are stored by now: read them, as classic.Stop does
+      // where the classic hooks are not passed over.
+      const path = session?.path
+      const index = path
+        ? await readTranscript($, path, seen, index => {
+            if (index && merge(index)) void redrawRail($)
+            tellNotice($, seen, isBound)
+          })
+        : undefined
+      tellNotice($, seen, isBound)
+      if (index) merge(index)
       await redrawRail($)
     }
     return result
+  })
+
+  // A /clear or a resume ends this conversation and the process goes on in
+  // another, with no session.start; the classic SessionStart that says so may
+  // be passed over.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      forget()
+      await redrawRail($)
+    }
+    return next(e)
   })
 
   // A prompt was sent: typed, or delivered from Remote Control. Its rows drawn
