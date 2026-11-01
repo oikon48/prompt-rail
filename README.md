@@ -47,13 +47,14 @@ Mouse works best with `"tui": "fullscreen"`.
 
 The bars sit on a row of their own under the hint line below the prompt input, next to the status line, with the prompt being read beside them. `‹` and `›` step to the previous or next prompt. The hint line above them is Claude Code's own, so its mode label and hints stay as they are.
 
-```text
-────────────────────────────────
-❯
-────────────────────────────────
-⏵⏵ auto mode on (shift+tab to cycle)
-‹│┃││› #2/4 the prompt being read
-```
+<img src="docs/below.png" alt="The below rail: Claude Code's hint line, and under it a row of bars with the hovered prompt and its turn summary beside them" width="800">
+
+<details>
+<summary>The below layout in motion</summary>
+
+<img src="docs/below.gif" alt="prompt-rail 0.9.0: hovering a bar under the prompt previews a prompt, clicking jumps to it, the arrows step, and /config picks the layout" width="800">
+
+</details>
 
 ## Commands
 
