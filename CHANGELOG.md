@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - Added the below layout (#70): `/prompt-rail below`, or `below` in the "Rail mode" row of `/config`, draws the bars on a row of their own under the hint line below the prompt input, next to the status line, with the prompt being read beside them and `‹` `›` to step to the previous or next one; hovering a bar shows its prompt and turn there, and Claude Code's own hint line stays as it draws it. It is the terminal's; the desktop app draws the rail above the prompt
 - Added a picture of where the rail sits around the prompt input to the answer of `/prompt-rail <layout>`, since `/config` shows a setting's help on one line

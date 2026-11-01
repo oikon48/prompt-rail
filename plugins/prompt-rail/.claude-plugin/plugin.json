@@ -1,6 +1,6 @@
 {
   "name": "prompt-rail",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "A rail of your session's prompts beside the transcript, above or below the prompt; hover to read one, click to jump to it.",
   "author": {
     "name": "oikon48"
