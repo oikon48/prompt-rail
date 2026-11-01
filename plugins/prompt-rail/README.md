@@ -2,7 +2,7 @@
 
 A rail of your prompts for Claude Code. Hover to read one, click to jump back to it.
 
-prompt-rail is a mod: it draws a row of bars above the prompt input, or a pane beside the transcript, with one tick for each prompt you sent in the session. Hovering a tick shows the prompt and a short summary of its turn, and clicking it scrolls the transcript to that prompt. Commands step through the prompts from the keyboard.
+prompt-rail is a mod: it draws a row of bars above or below the prompt input, or a pane beside the transcript, with one tick for each prompt you sent in the session. Hovering a tick shows the prompt and a short summary of its turn, and clicking it scrolls the transcript to that prompt. Commands step through the prompts from the keyboard.
 
 It needs Claude Code v2.1.287 or later, in the terminal or in the Code tab of the Claude desktop app. Mouse works best with `"tui": "fullscreen"`.
 
@@ -23,6 +23,7 @@ Start a new session and the rail opens on its own.
 | --- | --- |
 | `/prompt-rail horizontal` | Bars above the prompt input (the default) |
 | `/prompt-rail vertical` | A pane beside the transcript |
+| `/prompt-rail below` | Bars under the hint line below the prompt input (terminal; the desktop app draws them above) |
 | `/prompt-rail off` | Hide the rail |
 | `/prompt-rail next`, `prev` | Jump to the next or previous prompt |
 | `/prompt-rail first`, `last` | Jump to the first or the newest prompt |
@@ -54,7 +55,7 @@ Its hooks watch and do not change what passes through them:
 - `classic.SessionStart` and `classic.Stop` read the transcript path from the event to refresh the rail, and pass the event on unchanged; the rail adds no context or instructions.
 - `session.end` notes that a `/clear` or a resume has started another conversation, so the rail starts its list over, and passes the event on unchanged.
 - `prompt.submit` and `session.receive` note that a prompt was sent, and pass it on unchanged.
-- `turn.start`, `turn.complete`, and `ui.render` on transcript rows note which prompt is on screen and which turn is running, read the transcript again as a turn starts and ends, and draw those rows as Claude Code does. `ui.render`, `ui.focus`, and `ui.press` on the rail's own pane and band draw the rail and take its clicks and keys.
+- `turn.start`, `turn.complete`, and `ui.render` on transcript rows note which prompt is on screen and which turn is running, read the transcript again as a turn starts and ends, and draw those rows as Claude Code does. `ui.render`, `ui.focus`, and `ui.press` on the rail's own pane and band draw the rail and take its clicks and keys. In the below layout, `ui.render` on the hint line under the prompt draws Claude Code's own line unchanged and adds the rail's row under it.
 
 ## Limitations
 

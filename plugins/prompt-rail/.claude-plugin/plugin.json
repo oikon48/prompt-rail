@@ -1,7 +1,7 @@
 {
   "name": "prompt-rail",
   "version": "0.8.2",
-  "description": "A rail of your session's prompts beside the transcript or above the prompt; hover to read one, click to jump to it.",
+  "description": "A rail of your session's prompts beside the transcript, above or below the prompt; hover to read one, click to jump to it.",
   "author": {
     "name": "oikon48"
   },
@@ -20,12 +20,13 @@
     "mode": {
       "type": "string",
       "title": "Rail mode",
-      "description": "off: no rail. vertical: a pane beside the transcript, one row per prompt. horizontal: a row of bars above the prompt input (terminal only). /prompt-rail off|vertical|horizontal changes it too.",
+      "description": "off: no rail. vertical: a pane beside the transcript, one row per prompt. horizontal: a row of bars above the prompt input (terminal only). below: a row of bars under the hint line below the prompt input (terminal only; the desktop app keeps it above). /prompt-rail off|vertical|horizontal|below changes it too and shows where the rail sits.",
       "default": "horizontal",
       "options": [
         "off",
         "vertical",
-        "horizontal"
+        "horizontal",
+        "below"
       ]
     }
   }
