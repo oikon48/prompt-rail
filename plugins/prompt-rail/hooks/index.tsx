@@ -765,35 +765,46 @@ async function rememberedTranscript($: EngineInterface) {
 // transcriptCandidates), for the directory the session started in or the one
 // it is in now: the first candidate the disk holds, else the one for the
 // starting directory, which a fresh session writes with its first prompt.
-// Undefined for a plugin not installed from a marketplace, whose config
-// folder is not known, and for a folder name the engine cut that no folder on
-// disk matches yet.
-async function findTranscript($: EngineInterface, id: string, launchCwd: string | undefined) {
-  const config = configDirOf($.plugin.root)
+// Undefined for a plugin not installed from a marketplace (its `root`, see
+// configDirOf), whose config folder is not known, and for a folder name the
+// engine cut that no folder on disk matches yet.
+export async function findTranscript(probe: Probe, root: string, id: string, launchCwd: string | undefined) {
+  const config = configDirOf(root)
   if (config === undefined) return undefined
-  const now = await Promise.all([$.session.cwd(), $.session.root()]).catch(() => [])
+  const now = await probe.dirs().catch(() => [])
   const cwds = [...new Set([launchCwd, ...now].filter((cwd): cwd is string => cwd !== undefined))]
-  let folders: string[] | undefined
+  let folders: readonly string[] | undefined
   const found: string[] = []
   for (const cwd of cwds) {
     let candidates = transcriptCandidates(config, cwd, id)
     if (candidates.length === 0) {
-      folders ??= await $.fs.list([config.dir, 'projects'].join(config.sep)).then(
-        list => list.filter(entry => entry.kind === 'dir').map(entry => entry.name),
-        () => [],
-      )
+      folders ??= await probe.folders([config.dir, 'projects'].join(config.sep)).catch(() => [])
       candidates = transcriptCandidates(config, cwd, id, folders)
     }
     found.push(...candidates)
   }
-  for (const path of found) if (await $.fs.exists(path).catch(() => false)) return path
+  for (const path of found) if (await probe.exists(path).catch(() => false)) return path
   return cwds[0] === undefined ? undefined : transcriptCandidates(config, cwds[0], id)[0]
+}
+
+// What findTranscript reads of the session and the disk: the directories the
+// session is in now (where it runs, its project root), whether a file exists,
+// and the names of the folders in a folder.
+export type Probe = {
+  dirs: () => Promise<readonly string[]>
+  exists: (path: string) => Promise<boolean>
+  folders: (path: string) => Promise<readonly string[]>
 }
 
 // The transcript path a classic SessionStart remembered for this session, or
 // else the one found on disk: with the classic hooks passed over, the only one.
 async function transcriptOf($: EngineInterface, id: string, launchCwd: string | undefined) {
-  return (await rememberedTranscript($)) ?? (await findTranscript($, id, launchCwd))
+  const probe: Probe = {
+    dirs: async () => [await $.session.cwd(), await $.session.root()],
+    exists: path => $.fs.exists(path),
+    folders: async path => (await $.fs.list(path)).filter(entry => entry.kind === 'dir').map(entry => entry.name),
+  }
+  return (await rememberedTranscript($)) ?? (await findTranscript(probe, $.plugin.root, id, launchCwd))
 }
 
 export const register: Register = (on, options) => {

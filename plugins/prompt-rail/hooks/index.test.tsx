@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, configDirOf, drawnRow, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, streamRequests, tick, transcriptCandidates, turnLine } from './index.tsx'
+import { bar, configDirOf, drawnRow, findTranscript, jumpNotice, noteScroll, pickPrompt, rowKey, stepFrom, streamRequests, tick, transcriptCandidates, turnLine } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -677,6 +677,67 @@ test('a project folder name over 200 characters is matched by its cut, the engin
     `/h/.claude/projects/${cut}-k3j9/s1.jsonl`,
     `/h/.claude/projects/${cut}-z1/s1.jsonl`,
   ])
+})
+
+// The disk findTranscript probes: the session's directories, the files that
+// exist, and the folders under the config folder's `projects`. Each probe of
+// a file is recorded.
+const CONFIG_ROOT = '/h/.claude/plugins/cache/oikon48/prompt-rail/0.8.2'
+const PROJECTS = '/h/.claude/projects'
+type ProbeDisk = { files?: string[]; folders?: string[]; cwd?: string; root?: string }
+const probeOf = ({ files = [], folders = [], cwd = '/w/app', root = cwd }: ProbeDisk = {}) => {
+  const probes: string[] = []
+  const probe = {
+    dirs: async () => [cwd, root],
+    exists: async (path: string) => {
+      probes.push(path)
+      return files.includes(path)
+    },
+    folders: async (path: string) => (path === PROJECTS ? folders : []),
+  }
+  return { probe, probes }
+}
+
+test('a transcript on disk is found under the folder of the directory the session started in', async () => {
+  const { probe } = probeOf({ files: [`${PROJECTS}/-w-app/s1.jsonl`] })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-app/s1.jsonl`)
+})
+
+test('a session that moved is found under the folder of the directory it is in now', async () => {
+  const { probe } = probeOf({ files: [`${PROJECTS}/-w-other/s1.jsonl`], cwd: '/w/other' })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-other/s1.jsonl`)
+})
+
+test("a fresh session's transcript, not written yet, is taken where its starting directory files it", async () => {
+  const { probe, probes } = probeOf({ cwd: '/w/other', root: '/w' })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-app/s1.jsonl`)
+  expect(probes).toEqual([`${PROJECTS}/-w-app/s1.jsonl`, `${PROJECTS}/-w-other/s1.jsonl`, `${PROJECTS}/-w/s1.jsonl`])
+})
+
+test('a folder name the engine cut is found among the projects folders that start with its cut', async () => {
+  const long = `/w/${'a'.repeat(240)}`
+  const cut = `-w-${'a'.repeat(197)}`
+  const { probe } = probeOf({ files: [`${PROJECTS}/${cut}-z1/s1.jsonl`], folders: [`${cut}-k3j9`, 'other', `${cut}-z1`], cwd: long })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', long)).toBe(`${PROJECTS}/${cut}-z1/s1.jsonl`)
+})
+
+test('a cut folder name no transcript is under yet gives no path to keep', async () => {
+  const long = `/w/${'a'.repeat(240)}`
+  const cut = `-w-${'a'.repeat(197)}`
+  const { probe } = probeOf({ folders: [`${cut}-k3j9`], cwd: long })
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', long)).toBeUndefined()
+})
+
+test('a session whose directories cannot be read is looked for under the one it started in', async () => {
+  const { probe } = probeOf({ files: [`${PROJECTS}/-w-app/s1.jsonl`] })
+  probe.dirs = () => Promise.reject(new Error('no session here'))
+  expect(await findTranscript(probe, CONFIG_ROOT, 's1', '/w/app')).toBe(`${PROJECTS}/-w-app/s1.jsonl`)
+})
+
+test('a plugin not installed from a marketplace looks for no transcript', async () => {
+  const { probe, probes } = probeOf({ files: [`${PROJECTS}/-w-app/s1.jsonl`] })
+  expect(await findTranscript(probe, '/w/src/prompt-rail/plugins/prompt-rail', 's1', '/w/app')).toBeUndefined()
+  expect(probes).toEqual([])
 })
 
 // A session whose classic hooks are passed over: the store's remembered path
