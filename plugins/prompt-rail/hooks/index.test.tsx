@@ -65,14 +65,23 @@ const drawPrompts = async ($: any, on: any, below?: string) => {
     const { Box, Text } = $.ui.resolve(e)
     return below === undefined ? <Box /> : <Text>{below}</Text>
   })
+  // Stand in for the engine's own hint line under the prompt.
+  on('ui.render', { component: 'PromptHint' }, ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.hint}</Text>
+  })
   mock.store(on)
   on('config.set', ($: any, e: any) => ({ value: e.value }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.close', () => ({}))
+  on('ui.close', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm1', props: prompt('first prompt', null) })
   await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm2', props: prompt('second prompt', { first: 0, last: 3, of: 4 }) })
 }
+
+const HINT = { isDraft: false, isWorking: false, hint: '(shift+tab to cycle)' }
+const hintLine = ($: any, surface: 'terminal' | 'desktop' = 'terminal', columns = 80) =>
+  $.ui.mount({ plugin: 'prompt-rail', surface, component: 'PromptHint', viewport: { columns, rows: 40 }, props: HINT })
 
 test('a narrow vertical rail leaves the prompt text to hidden cards in the band', async ($, on) => {
   await drawPrompts($, on)
@@ -111,6 +120,101 @@ test('/prompt-rail horizontal draws a text line over one row of bars, heavy wher
   expect(line).toBeLessThan(drawn.findIndex((node: any) => node.type === 'Button'))
   expect((await band.find({ key: 'card-0' }))?.props.display).toBe('none')
   expect((await band.press({ key: 'jump-0' }))?.element).toBe('jump-0')
+})
+
+test('/prompt-rail below keeps the engine\'s hint line and draws a row of bars under it', async ($, on) => {
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'below' })
+  const line = await hintLine($)
+  // The engine's line first, as the engine draws it, then the rail's own row.
+  const drawn = await line.findAll({})
+  const engine = drawn.findIndex((node: any) => node.type === 'Text' && node.text === '(shift+tab to cycle)')
+  expect(engine).toBeGreaterThanOrEqual(0)
+  expect(engine).toBeLessThan(drawn.findIndex((node: any) => node.type === 'Button'))
+  // A step back, one bar per prompt with the one on screen heavy, and no step
+  // forward from the newest.
+  const buttons = await line.findAll({ type: 'Button' })
+  expect(buttons.map((b: any) => b.props.key)).toEqual(['step-prev', 'jump-0', 'jump-1'])
+  expect(buttons.map((b: any) => b.props.label)).toEqual(['‹', '│', '┃'])
+  // Beside the bars, the prompt being read and how many there are; a hovered
+  // bar's card painted over it.
+  expect(await line.find({ type: 'Text', text: /^#2\/2 second prompt$/ })).toBeDefined()
+  expect((await line.find({ key: 'card-0' }))?.props.display).toBe('none')
+  expect((await line.press({ key: 'jump-0' }))?.element).toBe('jump-0')
+  expect((await line.press({ key: 'step-prev' }))?.element).toBe('step-prev')
+})
+
+test('below leaves the band above the prompt to the other mods on the terminal', async ($, on) => {
+  await drawPrompts($, on, 'another mod')
+  await $.command.run({ command: 'prompt-rail', args: 'below' })
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+  expect(await band.find({ type: 'Text', text: 'another mod' })).toBeDefined()
+})
+
+test('on the desktop below keeps the rail in the band and the hint line as the engine has it', async ($, on) => {
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'below' })
+  const line = await hintLine($, 'desktop')
+  expect(await line.findAll({ type: 'Button' })).toEqual([])
+  const band = await $.ui.mount({ plugin: 'prompt-rail', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+  expect((await band.findAll({ type: 'Button' })).map((b: any) => b.props.key)).toEqual(['jump-0', 'jump-1'])
+})
+
+test('the hint line is the engine\'s alone in the other modes', async ($, on) => {
+  await drawPrompts($, on)
+  for (const mode of ['horizontal', 'vertical', 'off']) {
+    await $.command.run({ command: 'prompt-rail', args: mode })
+    const line = await hintLine($)
+    expect(await line.findAll({ type: 'Button' })).toEqual([])
+    expect(await line.find({ type: 'Text', text: '(shift+tab to cycle)' })).toBeDefined()
+    await line.unmount()
+  }
+})
+
+test('a narrow hint line keeps a window of bars around the prompt being read', async ($, on) => {
+  await drawPrompts($, on)
+  for (let i = 3; i <= 12; i++) {
+    await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: `m${i}`, props: prompt(`prompt ${i}`, null) })
+  }
+  await $.command.run({ command: 'prompt-rail', args: 'below' })
+  const line = await hintLine($, 'terminal', 20)
+  const keys = (await line.findAll({ type: 'Button' })).map((b: any) => String(b.props.key))
+  // Prompt 2 is on screen: the window starts at the first, a step either way.
+  expect(keys[0]).toBe('step-prev')
+  expect(keys.at(-1)).toBe('step-next')
+  const bars = keys.filter(key => key.startsWith('jump-'))
+  expect(bars[0]).toBe('jump-0')
+  expect(bars.length).toBeLessThan(12)
+  expect(bars).toContain('jump-1')
+})
+
+test("below, the rail's row leaves the hint line once a subagent's transcript is in view", async ($, on) => {
+  const clock = mock.clock(on)
+  await drawPrompts($, on)
+  await $.command.run({ command: 'prompt-rail', args: 'below' })
+  const line = await hintLine($)
+  expect((await line.findAll({ type: 'Button' })).length).toBeGreaterThan(0)
+  // The band is drawn again as the view switches; the hint line has no view of its own.
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, view: { agentId: 'ag1' } } })
+  await clock.advance(0)
+  expect(await line.findAll({ type: 'Button' })).toEqual([])
+  expect(await line.find({ type: 'Text', text: '(shift+tab to cycle)' })).toBeDefined()
+})
+
+test('/prompt-rail <mode> answers with a picture of where the rail sits by the prompt', async ($, on) => {
+  await drawPrompts($, on)
+  const picture = async (mode: string) => String((await $.command.run({ command: 'prompt-rail', args: mode }))?.text ?? '').split('\n')
+  const at = (lines: string[], pattern: RegExp) => lines.findIndex(line => pattern.test(line))
+  const below = await picture('below')
+  expect(at(below, /❯/)).toBeGreaterThanOrEqual(0)
+  expect(at(below, /← the rail/)).toBeGreaterThan(at(below, /❯/))
+  const above = await picture('horizontal')
+  expect(at(above, /← the rail/)).toBeGreaterThanOrEqual(0)
+  expect(at(above, /← the rail/)).toBeLessThan(at(above, /❯/))
+  const vertical = await picture('vertical')
+  expect(at(vertical, /← the rail/)).toBeGreaterThanOrEqual(0)
+  expect(await picture('off')).toEqual(['off'])
 })
 
 test('with no prompt on screen the text line shows the newest one and no bar is heavy', async ($, on) => {
@@ -1395,6 +1499,10 @@ test('/prompt-rail <mode> writes the mode setting and switches at once', async (
   await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   expect(disk.settings.get('prompt-rail.mode')).toBe('vertical')
   expect(disk.panes.at(-1)).toBe('open prompt-rail')
+  // Below the prompt the terminal's hint line carries the rail: no pane.
+  await $.command.run({ command: 'prompt-rail', args: 'below' })
+  expect(disk.settings.get('prompt-rail.mode')).toBe('below')
+  expect(disk.panes.at(-1)).toBe('close prompt-rail')
 })
 
 // A session with no /config row for the plugin's fields (the desktop app's
@@ -1590,7 +1698,7 @@ test('/prompt-rail runs mid-turn and takes next and prev', async ($, on) => {
   world(on, {}, TRANSCRIPT, disk)
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
   expect(disk.commands).toEqual([
-    expect.objectContaining({ name: 'prompt-rail', immediate: true, argumentHint: '[off|vertical|horizontal|next|prev|first|last|<n>|find <words>]' }),
+    expect.objectContaining({ name: 'prompt-rail', immediate: true, argumentHint: '[off|vertical|horizontal|below|next|prev|first|last|<n>|find <words>]' }),
     // Argument-free, for a keybinding to name.
     expect.objectContaining({ name: 'prompt-rail-next', immediate: true }),
     expect.objectContaining({ name: 'prompt-rail-prev', immediate: true }),

@@ -33,7 +33,7 @@ prompt-rail is a mod, so it needs Claude Code 2.1.287 or later, where mods are o
 
 Mouse works best with `"tui": "fullscreen"`.
 
-## Two layouts
+## Three layouts
 
 ### Horizontal, above the prompt (default)
 
@@ -43,12 +43,25 @@ Mouse works best with `"tui": "fullscreen"`.
 
 <img src="docs/vertical.png" alt="The vertical rail: one row per prompt in a pane beside the transcript, the prompt being read marked with a thick tick" width="480">
 
+### Below, under the prompt
+
+The bars sit on a row of their own under the hint line below the prompt input, next to the status line, with the prompt being read beside them. `‹` and `›` step to the previous or next prompt. The hint line above them is Claude Code's own, so its mode label and hints stay as they are.
+
+```text
+────────────────────────────────
+❯
+────────────────────────────────
+⏵⏵ auto mode on (shift+tab to cycle)
+‹│┃││› #2/4 the prompt being read
+```
+
 ## Commands
 
 | Command | |
 | --- | --- |
 | `/prompt-rail horizontal` | Bars above the prompt input |
 | `/prompt-rail vertical` | A pane beside the transcript |
+| `/prompt-rail below` | Bars under the hint line below the prompt input |
 | `/prompt-rail off` | Hide the rail |
 | `/prompt-rail next` | Jump to the next prompt |
 | `/prompt-rail prev` | Jump to the previous prompt |
@@ -59,7 +72,7 @@ Mouse works best with `"tui": "fullscreen"`.
 | `/prompt-rail-toggle` | Hide the rail, or bring it back in the layout last on, with no argument, for a keybinding |
 | `/prompt-rail` | Reopen the rail in the current layout |
 
-The layout is also the "Rail mode" row in `/config`, and it is kept across sessions.
+The layout is also the "Rail mode" row in `/config`, and it is kept across sessions. Switching it with `/prompt-rail <layout>` also draws where the rail now sits around the prompt input.
 
 ### Keyboard
 
@@ -105,7 +118,8 @@ The rail lists the prompts of the live branch, so prompts abandoned with `/rewin
 <summary>Known limits</summary>
 
 - The mods API may still change between Claude Code releases.
-- The hover card with the turn summary is part of the horizontal rail.
+- The hover card with the turn summary is part of the horizontal and below rails.
+- The below rail is the terminal's. The Claude desktop app draws it above the prompt, as the horizontal rail.
 - The Claude desktop app draws the horizontal rail and its hover cards, but a click cannot jump there. The app gives a plugin no way to scroll its transcript, so the rail says so once a session. The prompt being read is named beside the bars rather than on the line above them, since the app paints a card over that line without hiding what is under it. Checked with Claude Code 2.1.280, the app did not draw the vertical pane.
 - The dock width is shared by all plugin panes; drag its edge to narrow it, down to 24 columns.
 - A `/compact` command's own row cannot be jumped to; its tick turns dotted after the first try.

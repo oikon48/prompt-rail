@@ -20,7 +20,7 @@ const LEGACY_MODE_KEY = 'mode'
 // with no /config row for plugin fields), so a module reloaded mid-session
 // starts in it again. Keyed by session, so a later session starts clean.
 const SESSION_MODE_KEY_PREFIX = 'session-mode:'
-// The mode last on (vertical or horizontal), so `prompt-rail-toggle` turned
+// The mode last on (vertical, horizontal or below), so `prompt-rail-toggle` turned
 // off has a mode to come back to; horizontal until another was written.
 const LAST_ON_KEY = 'last-on'
 // `transcript:<session id>` -> { path, at }, so a hot-reloaded module (whose
@@ -91,7 +91,7 @@ const MOVED = { plugin: 'prompt-rail', key: 'moved' } as const
 // How long the band's text line shows the card of the bar the focus ring is
 // on after the ring last moved: no event says the ring left the band.
 const RING_CARD_MS = 4000
-const USAGE = '[off|vertical|horizontal|next|prev|first|last|<n>|find <words>]'
+const USAGE = '[off|vertical|horizontal|below|next|prev|first|last|<n>|find <words>]'
 // Commands that step through the prompts, each with the way it steps.
 const STEP_COMMANDS = [
   ['prompt-rail-next', 'next'],
@@ -99,9 +99,43 @@ const STEP_COMMANDS = [
 ] as const
 
 // vertical: ticks in a docked pane; horizontal: ticks in a row above the
-// prompt; off: no rail at all. One setting, so /config keeps a single row.
-type Mode = 'off' | 'vertical' | 'horizontal'
-const isMode = (value: unknown): value is Mode => value === 'off' || value === 'vertical' || value === 'horizontal'
+// prompt; below: ticks in a row under the hint line below the prompt; off: no
+// rail at all. One setting, so /config keeps a single row.
+type Mode = 'off' | 'vertical' | 'horizontal' | 'below'
+const isMode = (value: unknown): value is Mode => value === 'off' || value === 'vertical' || value === 'horizontal' || value === 'below'
+
+// Whether the band above the prompt carries the rail: horizontal, and below
+// where no terminal draws the hint line's row (the desktop app draws the band).
+const isBandMode = (mode: Mode, isTerminal: boolean) => mode === 'horizontal' || (mode === 'below' && !isTerminal)
+
+// Where a mode puts the rail, drawn around the prompt input, for the answer
+// to `/prompt-rail <mode>`: /config draws a row's help on one line, so this
+// is where a picture of the choice can be shown. The engine heads a command's
+// answer with the plugin's name, so the picture does not.
+const PROMPT_BOX = ['  ────────────────────────────────', '  ❯', '  ────────────────────────────────']
+export const placePicture = (mode: Mode) => {
+  if (mode === 'below') {
+    return [
+      'below the prompt input',
+      ...PROMPT_BOX,
+      '  ? for shortcuts',
+      '  ‹│┃│ #2/3 the prompt being read   ← the rail',
+      '(on the terminal; the desktop app keeps it above the prompt)',
+    ].join('\n')
+  }
+  if (mode === 'horizontal') {
+    return ['above the prompt input', '  #2 the prompt being read', '  │┃│                              ← the rail', ...PROMPT_BOX].join('\n')
+  }
+  if (mode === 'vertical') {
+    return [
+      'a pane beside the transcript',
+      '  ⏺ the transcript …           │ ─',
+      '                               │ ━   ← the rail',
+      ...PROMPT_BOX,
+    ].join('\n')
+  }
+  return 'off'
+}
 
 type Entry = { id: string; text: string }
 
@@ -667,9 +701,10 @@ export function transcriptCandidates(config: { dir: string; sep: string }, cwd: 
 }
 
 // Open the pane where the mode draws the rail in it; close it elsewhere (off,
-// or horizontal on the terminal, where the band carries the rail).
+// or horizontal or below on the terminal, where the band or the hint line
+// carries the rail).
 async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
-  if (mode === 'off' || (mode === 'horizontal' && isTerminal)) {
+  if (mode === 'off' || ((mode === 'horizontal' || mode === 'below') && isTerminal)) {
     await $.ui.close({ id: PANE })
   } else {
     await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
@@ -1141,12 +1176,17 @@ export const register: Register = (on, options) => {
 
   // The rail's sites say whose transcript is in view; the rows a switch
   // leaves were another transcript's, and those it brings report anew.
+  // True when the view switched. The hint line under the prompt has no view
+  // of its own, so below, a switch draws the rail's sites again: the row
+  // under it leaves, or comes back, with the switch.
   const noteView = (agentId: string | undefined) => {
-    if (agentId !== viewAgent) {
+    const isSwitched = agentId !== viewAgent
+    if (isSwitched) {
       onScreen.clear()
       landed = undefined
     }
     viewAgent = agentId
+    return isSwitched
   }
 
   // A change of the setting reloads this module with the new value.
@@ -1215,7 +1255,7 @@ export const register: Register = (on, options) => {
       // every other plugin's and the built-ins, so a generic name would collide.
       name: 'prompt-rail',
       description:
-        'Show the prompt rail: vertical (a pane beside the transcript), horizontal (above the prompt) or off; next, prev, first, last, a number or find <words> jumps to a prompt.',
+        'Show the prompt rail: vertical (a pane beside the transcript), horizontal (above the prompt), below (under the prompt) or off; next, prev, first, last, a number or find <words> jumps to a prompt.',
       argumentHint: USAGE,
       // Runs while a turn streams, so next and prev move through it then too.
       immediate: true,
@@ -1227,7 +1267,7 @@ export const register: Register = (on, options) => {
     }
     await $.command.register({
       name: 'prompt-rail-toggle',
-      description: 'Toggle the rail: off ↔ the mode last on (vertical or horizontal).',
+      description: 'Toggle the rail: off ↔ the mode last on (vertical, horizontal or below).',
       immediate: true,
     })
     isTerminal = e.surface === 'terminal'
@@ -1329,15 +1369,16 @@ export const register: Register = (on, options) => {
     }
     // Reopening a rail that is off would only close it again: say how to turn it on.
     if (!asked && mode === 'off') {
-      $.ui.toast('the rail is off; /prompt-rail vertical or /prompt-rail horizontal turns it on')
+      $.ui.toast('the rail is off; /prompt-rail vertical, horizontal or below turns it on')
       return {}
     }
     if (isMode(asked)) mode = asked
     await seatRail($, mode, isTerminal)
     await redrawRail($)
     // Last: a changed setting reloads this module, which then starts in it.
-    if (isMode(asked)) await writeMode($, asked)
-    return {}
+    if (!isMode(asked)) return {}
+    await writeMode($, asked)
+    return { text: placePicture(asked) }
   })
 
   // Rebuild the list from the transcript file, whose uuids are the ids the
@@ -1556,7 +1597,7 @@ export const register: Register = (on, options) => {
     await $.state.get(MOVED)
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
-    noteView(e.props.view.agentId)
+    if (noteView(e.props.view.agentId) && mode === 'below') redrawRailLater($)
     const nextColumns = isRail ? e.props.bodyColumns : 0
     if (nextColumns !== railColumns) {
       // The band decides from this whether it carries the cards.
@@ -1620,9 +1661,11 @@ export const register: Register = (on, options) => {
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     await $.state.get(MOVED)
-    noteView(e.props.view.agentId)
+    if (noteView(e.props.view.agentId) && mode === 'below') redrawRailLater($)
     // Nothing while the rail is off, a survey holds the band or a subagent's transcript is in view.
     if (mode === 'off' || e.props.hasSurvey || e.props.view.agentId !== undefined || entries.length === 0) return next(e)
+    // Below the prompt on the terminal, the hint line carries the rail.
+    if (mode === 'below' && e.surface === 'terminal') return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     // Every mod shares the band, and a tree returned here replaces what the
     // mods after this one draw. Keep theirs, above the rail, so the bars stay
@@ -1642,7 +1685,7 @@ export const register: Register = (on, options) => {
         </Box>
       ))
 
-    if (mode === 'horizontal') {
+    if (isBandMode(mode, e.surface === 'terminal')) {
       // Two rows: the text line, then the bars beside the prompt. The text line
       // shows the prompt being read, dim, and the hovered one's card painted
       // over it; the bar of the prompt being read is heavy.
@@ -1740,12 +1783,78 @@ export const register: Register = (on, options) => {
     return below
   })
 
+  // The hint line under the prompt. Below, on the terminal: the engine's line
+  // as the engine draws it, its pills live, then a row of the rail's own: a
+  // step either way around the bars, and beside them the prompt being read,
+  // a hovered bar's card painted over it. The engine's line takes a row of
+  // its own whatever is put beside it, so the rail goes under it.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    // Read in every mode, so a switch away from below draws the line again.
+    await $.state.get(MOVED)
+    const engine = await next(e)
+    if (mode !== 'below' || e.surface !== 'terminal' || viewAgent !== undefined || entries.length === 0) return engine
+    const { Box, Text, Button } = $.ui.resolve(e)
+    // The engine indents the line two cells; one more is kept at the right end.
+    const width = Math.max(MIN_CARD_TEXT, (e.viewport?.columns ?? 80) - 3)
+    const current = currentIndex()
+    drawnCurrent = current
+    const center = current >= 0 ? current : entries.length - 1
+    // Up to half the row for the bars, the two steps beside them; a window
+    // centered on the prompt being read when they do not all fit.
+    const capacity = Math.min(entries.length, Math.max(1, Math.floor(width / 2) - 2))
+    const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
+    const shown = entries.slice(first, first + capacity)
+    // The rest of the row, past the steps and a gap.
+    const room = Math.max(MIN_CARD_TEXT, width - capacity - 3)
+    const step = (key: string, label: string, to: number) =>
+      to >= 0 ? <Button key={key} plain dimColor label={label} hover={{ scope: key, inverse: true, dimColor: false }} onPress={() => {}} /> : <Text> </Text>
+    const card = (i: number) => {
+      const entry = entries[i]
+      return entry ? `#${i + 1} ${withTurn(entry, room - `#${i + 1} `.length)}` : ''
+    }
+    const reading = `#${center + 1}/${entries.length} `
+    return (
+      <Box flexDirection="column">
+        {engine}
+        <Box flexDirection="row" height={1}>
+          {step('step-prev', '‹', stepFrom(current, entries.length, -1, isUnreachable))}
+          {shown.map((entry, offset) => {
+            const i = first + offset
+            return (
+              <Button
+                key={`jump-${i}`}
+                plain
+                dimColor={i !== current}
+                label={bar(i === current, isUnreachable(i))}
+                hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
+                onPress={() => {}}
+              />
+            )
+          })}
+          {step('step-next', '›', stepFrom(current, entries.length, 1, isUnreachable))}
+          <Box marginLeft={1} width={room} height={1}>
+            {/* With no prompt known on screen, the newest: bars alone read as a broken rail. */}
+            <Text dimColor wrap="truncate-end">{`${reading}${oneLine(entries[center]?.text ?? '', room - reading.length)}`}</Text>
+            {shown.map((_, offset) => {
+              const i = first + offset
+              return (
+                <Box key={`card-${i}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
+                  <Text wrap="truncate-end">{padTo(card(i), room)}</Text>
+                </Box>
+              )
+            })}
+          </Box>
+        </Box>
+      </Box>
+    )
+  })
+
   // The band holds the keyboard after a click or ctrl+x tab: the ring starts
   // on the bar of the prompt being read, the arrows move it, Enter jumps. A
   // scroll is refused here (it is no press), so the text line shows the
   // ringed prompt's card instead, for RING_CARD_MS after each move.
   on('ui.focus', { component: 'AbovePrompt', plugin: 'prompt-rail' }, async ($, e, next) => {
-    if (mode !== 'horizontal') return next(e)
+    if (!isBandMode(mode, isBandOnGrid)) return next(e)
     // A page keeps a clicked bar's ring beside the hovered one: two lit at once.
     if (!isBandOnGrid) return { deny: 'prompt-rail: on this surface the bars take clicks, not the focus ring' }
     const result = await next(e)
@@ -1772,7 +1881,9 @@ export const register: Register = (on, options) => {
 
   // Scroll from the press dispatch itself (a click).
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
-    const index = Number(/^jump-(\d+)/.exec(e.element)?.[1])
+    // The steps beside the bars under the prompt name no prompt of their own.
+    const dir = e.element === 'step-next' ? 1 : e.element === 'step-prev' ? -1 : 0
+    const index = dir === 0 ? Number(/^jump-(\d+)/.exec(e.element)?.[1]) : stepFrom(currentIndex(), entries.length, dir, isUnreachable)
     unring()
     const entry = entries[index]
     const target = entry && drawnRow(drawn, entry.id)
