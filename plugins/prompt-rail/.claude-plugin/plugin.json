@@ -28,6 +28,12 @@
         "horizontal",
         "below"
       ]
+    },
+    "classicHooks": {
+      "type": "boolean",
+      "title": "Classic hooks",
+      "description": "Register the classic.SessionStart and classic.Stop hooks, which name the transcript exactly. Off silences Claude Code's notes about the security default skipping them on a machine with managed settings or in a Team or Enterprise organization, where they never ran anyway; elsewhere, off leaves a session resumed from another directory, or an install loaded with --plugin-dir, with no transcript to read.",
+      "default": true
     }
   }
 }
