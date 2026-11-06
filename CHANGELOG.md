@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added a "Classic hooks" row to `/config` (#69): on a machine with managed settings or in a Team or Enterprise organization, Claude Code notes each session that the security default skipped prompt-rail's `classic.SessionStart` and `classic.Stop` hooks; turning the row off registers neither hook, which silences those notes and changes nothing else there, since the rail finds the transcript on its own. It stays on by default: without the classic hooks, a session resumed from another directory, or an install loaded with `--plugin-dir`, leaves the rail no transcript to read
+
 ## 0.9.0
 
 - Added the below layout (#70): `/prompt-rail below`, or `below` in the "Rail mode" row of `/config`, draws the bars on a row of their own under the hint line below the prompt input, next to the status line, with the prompt being read beside them and `‹` `›` to step to the previous or next one; hovering a bar shows its prompt and turn there, and Claude Code's own hint line stays as it draws it. It is the terminal's; the desktop app draws the rail above the prompt

@@ -35,6 +35,8 @@ Start a new session and the rail opens on its own.
 
 The layout is also the "Rail mode" row in `/config`, and it is kept across sessions.
 
+The "Classic hooks" row in `/config` keeps `classic.SessionStart` and `classic.Stop` registered (the default). On a machine with managed settings, or in a Team or Enterprise organization, Claude Code's security default passes the classic events over installed plugins and notes the skipped hooks each session; turning the row off registers neither hook, which silences those notes and changes nothing else there, since the rail finds the transcript on its own. Leave it on elsewhere: without the classic hooks, a session resumed from another directory than it started in, and an install loaded with `--plugin-dir`, leave the rail no transcript to read.
+
 In the horizontal layout, `ctrl+x tab` moves the focus to the bars: `←` `→` move across them, `Enter` jumps to the prompt, `Esc` returns to the prompt input.
 
 ## Privacy
@@ -52,7 +54,7 @@ prompt-rail makes no network requests and sends nothing anywhere, neither the tr
 Its hooks watch and do not change what passes through them:
 
 - `command.run` answers only its own commands (`/prompt-rail`, `/prompt-rail-next`, `/prompt-rail-prev`, `/prompt-rail-toggle`) and passes every other command on unchanged.
-- `classic.SessionStart` and `classic.Stop` read the transcript path from the event to refresh the rail, and pass the event on unchanged; the rail adds no context or instructions.
+- `classic.SessionStart` and `classic.Stop` read the transcript path from the event to refresh the rail, and pass the event on unchanged; the rail adds no context or instructions. The "Classic hooks" row in `/config` can turn their registration off.
 - `session.end` notes that a `/clear` or a resume has started another conversation, so the rail starts its list over, and passes the event on unchanged.
 - `prompt.submit` and `session.receive` note that a prompt was sent, and pass it on unchanged.
 - `turn.start`, `turn.complete`, and `ui.render` on transcript rows note which prompt is on screen and which turn is running, read the transcript again as a turn starts and ends, and draw those rows as Claude Code does. `ui.render`, `ui.focus`, and `ui.press` on the rail's own pane and band draw the rail and take its clicks and keys. In the below layout, `ui.render` on the hint line under the prompt draws Claude Code's own line unchanged and adds the rail's row under it.

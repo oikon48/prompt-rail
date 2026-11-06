@@ -1406,35 +1406,45 @@ export const register: Register = (on, options) => {
     return listed(entries) !== before.list || currentIndex() !== before.current
   }
 
-  on('classic.SessionStart', async ($, e, next) => {
-    if (e.source === 'clear') {
-      forget()
-      session = { id: e.session_id, path: e.transcript_path }
-      await redrawRail($)
-    } else {
-      // The path named here outranks one found on disk.
-      session = { id: e.session_id, path: e.transcript_path }
+  // The classic hooks name the transcript exactly, so they stay registered
+  // unless the classicHooks setting (userConfig) turns them off: without them
+  // a session the engine files where findTranscript does not look, such as one
+  // resumed from another directory, and a --plugin-dir install, whose config
+  // folder is not known, leave the rail no transcript to read. Where the
+  // security default passes the classic events over installed plugins, the
+  // engine notes the skipped hooks each session; off registers neither hook,
+  // which silences those notes and changes nothing else there.
+  if (options.classicHooks !== false) {
+    on('classic.SessionStart', async ($, e, next) => {
+      if (e.source === 'clear') {
+        forget()
+        session = { id: e.session_id, path: e.transcript_path }
+        await redrawRail($)
+      } else {
+        // The path named here outranks one found on disk.
+        session = { id: e.session_id, path: e.transcript_path }
+        const index = await readTranscript($, e.transcript_path, seen, index => {
+          if (index && merge(index)) void redrawRail($)
+          tellNotice($, seen, isBound)
+        })
+        if (index && merge(index)) await redrawRail($)
+        tellNotice($, seen, isBound)
+      }
+      listedAtRest = entries.length
+      await rememberTranscript($, e.session_id, e.transcript_path)
+      return next(e)
+    })
+
+    on('classic.Stop', async ($, e, next) => {
       const index = await readTranscript($, e.transcript_path, seen, index => {
         if (index && merge(index)) void redrawRail($)
         tellNotice($, seen, isBound)
       })
       if (index && merge(index)) await redrawRail($)
       tellNotice($, seen, isBound)
-    }
-    listedAtRest = entries.length
-    await rememberTranscript($, e.session_id, e.transcript_path)
-    return next(e)
-  })
-
-  on('classic.Stop', async ($, e, next) => {
-    const index = await readTranscript($, e.transcript_path, seen, index => {
-      if (index && merge(index)) void redrawRail($)
-      tellNotice($, seen, isBound)
+      return next(e)
     })
-    if (index && merge(index)) await redrawRail($)
-    tellNotice($, seen, isBound)
-    return next(e)
-  })
+  }
 
   // A main-loop turn starts (a subagent's run raises none): the newest
   // prompt's turn is running.
