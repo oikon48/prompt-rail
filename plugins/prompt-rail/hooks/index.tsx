@@ -207,6 +207,37 @@ export const noteScroll = (unreachable: Set<string>, id: string, deny: string | 
 export const jumpNotice = (deny: string, isUnscrollableSaid: boolean) =>
   UNSCROLLABLE.test(deny) ? (isUnscrollableSaid ? undefined : UNSCROLLABLE_TOAST) : deny
 
+// Once a person has jumped this many times, a later session shows them, once,
+// a survey in the band asking whether to star the repository on GitHub. Not
+// the session that got there, so it never comes while the rail is new to them.
+const STAR_ASK_JUMPS = 10
+// `star` -> { jumps, crossedIn?, asked? }: the jumps counted up to the
+// threshold, the session that reached it, and whether the survey was shown.
+const STAR_KEY = 'star'
+const STAR_URL = 'https://github.com/oikon48/prompt-rail'
+// How long the survey stays when left alone: shown just after a jump, it is
+// gone before a later `1` typed into an empty prompt can be taken for an answer.
+const STAR_SURVEY_MS = 30_000
+const GH_TIMEOUT_MS = 15_000
+const STAR_TOAST_MS = 12_000
+
+export type Star = { jumps: number; crossedIn?: string; asked?: boolean }
+
+const isStar = (value: unknown): value is Star => typeof (value as Star | undefined)?.jumps === 'number'
+
+// The count after one more jump in `sessionId`, or undefined when there is
+// nothing to write: the threshold was reached, or the question was asked.
+export const noteJump = (star: Star | undefined, sessionId: string): Star | undefined => {
+  const jumps = star?.jumps ?? 0
+  if (star?.asked || jumps >= STAR_ASK_JUMPS) return undefined
+  return jumps + 1 >= STAR_ASK_JUMPS ? { jumps: jumps + 1, crossedIn: sessionId } : { jumps: jumps + 1 }
+}
+
+// Whether a jump in `sessionId` asks the star question: the threshold was
+// reached in another session and nobody was asked yet.
+export const isStarDue = (star: Star | undefined, sessionId: string) =>
+  star !== undefined && !star.asked && star.jumps >= STAR_ASK_JUMPS && star.crossedIn !== sessionId
+
 // The prompt one step from `current` in direction `dir`, passing over those
 // `isSkipped` names; from an unknown place (-1), the first or the last. -1
 // when there is none that way.
@@ -749,6 +780,68 @@ async function jumpTo($: EngineInterface, id: string, target: string, unreachabl
   }
 }
 
+// Count a jump the person asked for (a click, a step, a number). In a
+// session after the one that reached the threshold, at rest, with someone
+// there to answer, mark the survey shown and say it is due instead. Read from
+// the store each time, as another session may have counted or shown it since;
+// best effort, so a store that fails never fails the jump.
+async function afterJump($: EngineInterface, isAnswerable: boolean) {
+  try {
+    const stored = await $.store.get(STAR_KEY)
+    const star = isStar(stored) ? stored : undefined
+    const id = await $.session.id()
+    if (star && isAnswerable && isStarDue(star, id)) {
+      await $.store.set(STAR_KEY, { ...star, asked: true })
+      return true
+    }
+    const counted = noteJump(star, id)
+    if (counted) await $.store.set(STAR_KEY, counted)
+  } catch {
+    // The count is a courtesy; the jump is done either way.
+  }
+  return false
+}
+
+// The star survey's state: on show, and the timer that takes it away when
+// left alone; done once this module showed it.
+type Survey = { isShown: boolean; isDone: boolean; timer?: Timer }
+
+// After a jump the person asked for: count it, or show the survey when due.
+async function jumpedForStar($: EngineInterface, survey: Survey, isAnswerable: boolean) {
+  if (survey.isDone || !(await afterJump($, isAnswerable))) return
+  survey.isDone = true
+  survey.isShown = true
+  survey.timer = $.clock.after(STAR_SURVEY_MS, () => void hideSurvey($, survey))
+  await redrawRail($)
+}
+
+// Take the survey away: answered, left alone, or a prompt was sent.
+async function hideSurvey($: EngineInterface, survey: Survey) {
+  if (!survey.isShown) return
+  survey.timer?.cancel()
+  survey.timer = undefined
+  survey.isShown = false
+  await redrawRail($)
+}
+
+// Star the repository through gh, as the person is logged in there; what to
+// tell them either way. The argv stays fixed text, so a reader of the source
+// sees all the mod can run.
+async function starWithGh($: EngineInterface) {
+  // The address first: a toast is a few narrow lines, and what does not fit is cut.
+  const fallback = (why: string) => `star it at ${STAR_URL} (${why})`
+  try {
+    const result = await $.process.run(['gh', 'api', '--hostname', 'github.com', '--method', 'PUT', 'user/starred/oikon48/prompt-rail', '--silent'], {
+      env: { GH_PROMPT_DISABLED: '1' },
+      timeoutMs: GH_TIMEOUT_MS,
+    })
+    if (result.exitCode === 0) return 'starred oikon48/prompt-rail, thank you'
+    return fallback(result.stderr.trim().split('\n')[0] || `gh exited with ${result.exitCode}`)
+  } catch (err) {
+    return fallback(`gh could not run: ${(err as Error).message}`)
+  }
+}
+
 // Draw the rail's sites again, and them alone (see MOVED).
 async function redrawRail($: EngineInterface) {
   const { value = 0 } = await $.state.get(MOVED)
@@ -1189,6 +1282,11 @@ export const register: Register = (on, options) => {
     return isSwitched
   }
 
+  // Whether someone is there to answer the star survey (not a -p run), and
+  // the survey itself (see jumpedForStar).
+  let isInteractive = false
+  const survey: Survey = { isShown: false, isDone: false }
+
   // A change of the setting reloads this module with the new value.
   let mode: Mode = isMode(options.mode) ? options.mode : 'horizontal'
   // The subagent whose transcript is in view, as the rail's sites last drew;
@@ -1271,6 +1369,7 @@ export const register: Register = (on, options) => {
       immediate: true,
     })
     isTerminal = e.surface === 'terminal'
+    isInteractive = e.isInteractive
     isBound = true
     tellNotice($, seen, isBound)
     // Move a mode an earlier version stored into the setting, once. Writing
@@ -1360,6 +1459,7 @@ export const register: Register = (on, options) => {
         })
         if (isDrawnStale()) await redrawRail($)
       }
+      if (entry && !notices.isUnscrollableSaid) await jumpedForStar($, survey, isInteractive && !isRunning)
       if (!entry) $.ui.toast(missingFor(e.command, asked))
       return {}
     }
@@ -1540,6 +1640,8 @@ export const register: Register = (on, options) => {
   // before the stored one are pending (see listDrawn).
   on('prompt.submit', async ($, e, next) => {
     unring()
+    // A prompt sent is the person moving on: the survey goes, unanswered.
+    await hideSurvey($, survey)
     if (PROMPT_KINDS.has(e.origin.kind) && noteSent(e.text.replace(VIEW_CONTEXT, '').trim())) await redrawRail($)
     return next(e)
   })
@@ -1662,6 +1764,27 @@ export const register: Register = (on, options) => {
             onPress={() => {}}
           />
         ))}
+      </Box>
+    )
+  })
+
+  // The star survey, a row of its own in the band above whatever the rest of
+  // the band draws, as the engine's own surveys read: the question, then a
+  // digit for each answer, which a bare digit in an empty prompt presses.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    await $.state.get(MOVED)
+    const rest = await next(e)
+    if (!survey.isShown || e.props.hasSurvey) return rest
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" paddingLeft={RAIL_INSET}>
+          <Text>Enjoying prompt-rail? Star it on GitHub? </Text>
+          <Button key="star-yes" plain hotkey="1" label="Star it with gh" onPress={() => {}} />
+          <Text>  </Text>
+          <Button key="star-no" plain hotkey="0" label="No thanks" onPress={() => {}} />
+        </Box>
+        {rest}
       </Box>
     )
   })
@@ -1891,6 +2014,15 @@ export const register: Register = (on, options) => {
 
   // Scroll from the press dispatch itself (a click).
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
+    // The star survey's answers: 1 stars with the person's gh login, 0 declines.
+    // The press is handed on first: once the survey is hidden, its buttons
+    // hold no handler for the engine to press.
+    if (e.element === 'star-yes' || e.element === 'star-no') {
+      const result = await next(e)
+      await hideSurvey($, survey)
+      if (e.element === 'star-yes') $.ui.toast(await starWithGh($), { timeoutMs: STAR_TOAST_MS })
+      return result
+    }
     // The steps beside the bars under the prompt name no prompt of their own.
     const dir = e.element === 'step-next' ? 1 : e.element === 'step-prev' ? -1 : 0
     const index = dir === 0 ? Number(/^jump-(\d+)/.exec(e.element)?.[1]) : stepFrom(currentIndex(), entries.length, dir, isUnreachable)
@@ -1904,6 +2036,7 @@ export const register: Register = (on, options) => {
       })
       if (isDrawnStale()) await redrawRail($)
     }
+    if (entry && !notices.isUnscrollableSaid) await jumpedForStar($, survey, isInteractive && !isRunning)
     return next(e)
   })
 }

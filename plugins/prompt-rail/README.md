@@ -43,13 +43,15 @@ In the horizontal layout, `ctrl+x tab` moves the focus to the bars: `←` `→` 
 
 This section is prompt-rail's privacy policy: what it reads, runs, and stores.
 
-prompt-rail makes no network requests and sends nothing anywhere, neither the transcript it reads nor your prompts. It collects no analytics, and its author receives no data from it. Everything it does stays on your machine:
+prompt-rail makes no network requests of its own and sends nothing anywhere, neither the transcript it reads nor your prompts. It collects no analytics, and its author receives no data from it. Everything it does stays on your machine, save the one GitHub star you may choose to give it (see the last item below):
 
 - It reads the current session's transcript file (the `.jsonl` file Claude Code writes for the session) to list your prompts and their turns.
 - Where no hook names that file, as on a machine with managed settings or in a Team or Enterprise organization, where Claude Code's security default keeps the classic hooks from installed plugins, it looks for the file where Claude Code keeps it: `projects/<folder>/<session id>.jsonl` under the config folder the mod is installed in, the folder named after the session's working directory. It checks whether that file exists, and for a working directory whose folder name Claude Code shortens, it lists the folder names under `projects` to find the one that matches. It reads no other file there.
-- When a transcript is too large to read in one call, it streams the file with `tail -c +N <transcript>`, which writes the file from byte N on to the mod, so the rail reads only what is new. On a Windows path where `tail` cannot start, it runs `powershell -NoProfile -NonInteractive` with a short script that copies the same file from that position. The output of either goes to the mod alone. It runs no other program.
+- When a transcript is too large to read in one call, it streams the file with `tail -c +N <transcript>`, which writes the file from byte N on to the mod, so the rail reads only what is new. On a Windows path where `tail` cannot start, it runs `powershell -NoProfile -NonInteractive` with a short script that copies the same file from that position. The output of either goes to the mod alone. It runs no other program, save `gh` as the last item says.
 - It writes one setting, its own `prompt-rail.mode` (the "Rail mode" row in `/config`), when you pick a layout. It sets no other setting and no environment variable.
 - In the mod's own store it keeps the layout last on and the transcript paths of the most recent sessions, so a resumed session can find its rail again.
+- In the same store it counts the jumps you make with the rail, up to 10 (none in a view that lets no plugin scroll the transcript, such as the desktop app), and notes the session that reached 10 and whether it has shown you the star survey. The count never leaves your machine.
+- Once you have made 10 jumps, a jump in a later session shows a one-line survey in the band above the prompt, once: "Enjoying prompt-rail? Star it on GitHub?", with `1: Star it with gh` and `0: No thanks`. It goes away after 30 seconds, or as soon as you send a prompt, and it is never shown again, whatever you answer or if you answer nothing. Only if you press `1` does it run `gh api --hostname github.com --method PUT user/starred/oikon48/prompt-rail --silent`, which stars the repository with your own GitHub CLI login. The mod never reads your token. Where `gh` is missing or not logged in, it stars nothing and shows the repository's address instead.
 
 Its hooks watch and do not change what passes through them:
 
@@ -57,7 +59,7 @@ Its hooks watch and do not change what passes through them:
 - `classic.SessionStart` and `classic.Stop` read the transcript path from the event to refresh the rail, and pass the event on unchanged; the rail adds no context or instructions. The "Classic hooks" row in `/config` can turn their registration off.
 - `session.end` notes that a `/clear` or a resume has started another conversation, so the rail starts its list over, and passes the event on unchanged.
 - `prompt.submit` and `session.receive` note that a prompt was sent, and pass it on unchanged.
-- `turn.start`, `turn.complete`, and `ui.render` on transcript rows note which prompt is on screen and which turn is running, read the transcript again as a turn starts and ends, and draw those rows as Claude Code does. `ui.render`, `ui.focus`, and `ui.press` on the rail's own pane and band draw the rail and take its clicks and keys. In the below layout, `ui.render` on the hint line under the prompt draws Claude Code's own line unchanged and adds the rail's row under it.
+- `turn.start`, `turn.complete`, and `ui.render` on transcript rows note which prompt is on screen and which turn is running, read the transcript again as a turn starts and ends, and draw those rows as Claude Code does. `ui.render`, `ui.focus`, and `ui.press` on the rail's own pane and band draw the rail and the star survey and take their clicks and keys. In the below layout, `ui.render` on the hint line under the prompt draws Claude Code's own line unchanged and adds the rail's row under it.
 
 ## Limitations
 
