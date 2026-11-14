@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.10.0
 
 - Added a "Classic hooks" row to `/config` (#69): on a machine with managed settings or in a Team or Enterprise organization, Claude Code notes each session that the security default skipped prompt-rail's `classic.SessionStart` and `classic.Stop` hooks; turning the row off registers neither hook, which silences those notes and changes nothing else there, since the rail finds the transcript on its own. It stays on by default: without the classic hooks, a session resumed from another directory, or an install loaded with `--plugin-dir`, leaves the rail no transcript to read
-- Added a one-time survey asking whether to star the repository on GitHub: after 10 jumps, a jump in a later session shows one line in the band above the prompt, `1: Star it with gh` or `0: No thanks`, as Claude Code's own surveys read; a first `1` asks to confirm and a second stars it with your own `gh` login, so a `1` typed to start a prompt stars nothing. The survey goes 30 seconds after it is drawn or when you send a prompt, never to come back. The privacy section of the plugin's README says what is counted and run
+- Added a one-time survey asking whether to star the repository on GitHub (#78): after 10 jumps, a jump in a later session shows one line in the band above the prompt, `1: Star it with gh` or `0: No thanks`, as Claude Code's own surveys read; a first `1` asks to confirm and a second stars it with your own `gh` login, so a `1` typed to start a prompt stars nothing. The survey goes 30 seconds after it is drawn or when you send a prompt, never to come back. The privacy section of the plugin's README says what is counted and run
+- Fixed the horizontal rail sitting above other mods' lines in the band on Claude Code 2.1.325, which stacks one row of the band for each plugin: the rail's row now goes last, so the bars stay beside the prompt (#78)
 
 ## 0.9.0
 
