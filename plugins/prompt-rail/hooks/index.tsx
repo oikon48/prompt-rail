@@ -762,8 +762,9 @@ async function writeMode($: EngineInterface, mode: Mode) {
 // Scroll the transcript to a prompt's row, drawn under `target`, from a
 // dispatch that answers the person's own input (a press, a typed command): a
 // transcript row moves only then. Records whether the prompt could be reached,
-// and returns whether the transcript scrolled to it. Where the view cannot
-// scroll at all, says so once a session (`notices.isUnscrollableSaid`).
+// and returns how it went: `landed`, `refused` (the engine said why not), or
+// `unanswered` (the call failed, nobody saying it could not move). Where the
+// view cannot scroll at all, says so once a session (`notices.isUnscrollableSaid`).
 async function jumpTo($: EngineInterface, id: string, target: string, unreachable: Set<string>, notices: { isUnscrollableSaid: boolean }) {
   try {
     const result = await $.ui.scroll({ to: { requestId: target }, block: 'start' })
@@ -773,55 +774,92 @@ async function jumpTo($: EngineInterface, id: string, target: string, unreachabl
       if (UNSCROLLABLE.test(result.deny)) notices.isUnscrollableSaid = true
     }
     if (noteScroll(unreachable, id, result.deny)) await redrawRail($)
-    return !result.deny
+    return result.deny ? 'refused' : 'landed'
   } catch (err) {
     $.ui.toast((err as Error).message)
-    return false
+    return 'unanswered'
   }
 }
 
-// Count a jump the person asked for (a click, a step, a number). In a
-// session after the one that reached the threshold, at rest, with someone
-// there to answer, mark the survey shown and say it is due instead. Read from
-// the store each time, as another session may have counted or shown it since;
-// best effort, so a store that fails never fails the jump.
+// Count a jump, or say the survey is due: in a session after the one that
+// reached the threshold, at rest, with someone there to answer. `finished`
+// once it was shown, so the caller stops asking the store. Read from the store
+// each time until then, as another session may have counted or shown it
+// since; best effort, so a store that fails never fails the jump.
 async function afterJump($: EngineInterface, isAnswerable: boolean) {
   try {
     const stored = await $.store.get(STAR_KEY)
     const star = isStar(stored) ? stored : undefined
+    if (star?.asked) return 'finished'
     const id = await $.session.id()
-    if (star && isAnswerable && isStarDue(star, id)) {
-      await $.store.set(STAR_KEY, { ...star, asked: true })
-      return true
-    }
+    if (star && isAnswerable && isStarDue(star, id)) return 'due'
     const counted = noteJump(star, id)
     if (counted) await $.store.set(STAR_KEY, counted)
+    if (counted?.crossedIn !== undefined) return 'reached'
   } catch {
     // The count is a courtesy; the jump is done either way.
   }
-  return false
+  return undefined
 }
 
-// The star survey's state: on show, and the timer that takes it away when
-// left alone; done once this module showed it.
-type Survey = { isShown: boolean; isDone: boolean; timer?: Timer }
+// The star survey: which row is on show (the question, or the confirmation a
+// first 1 asks for), whether a band in view has drawn it, and the timer that
+// takes it away when left alone. `isDone` once this module brought it up or
+// learnt it was shown; `isReachedHere` once this module counted the jump that
+// reached the threshold, so a /clear (a new session id) brings no survey to
+// the same sitting; `isBusy` while a jump's check runs, so two never overlap.
+type Survey = {
+  stage?: 'ask' | 'confirm'
+  isDrawn: boolean
+  isDone: boolean
+  isReachedHere: boolean
+  isBusy: boolean
+  timer?: Timer
+}
 
-// After a jump the person asked for: count it, or show the survey when due.
+// After a jump that was not refused: count it, or bring up the survey when
+// due. It is marked shown, and timed, only once a band in view draws it.
 async function jumpedForStar($: EngineInterface, survey: Survey, isAnswerable: boolean) {
-  if (survey.isDone || !(await afterJump($, isAnswerable))) return
-  survey.isDone = true
-  survey.isShown = true
+  if (survey.isDone || survey.isBusy) return
+  survey.isBusy = true
+  try {
+    const outcome = await afterJump($, isAnswerable && !survey.isReachedHere)
+    if (outcome === 'reached') survey.isReachedHere = true
+    if (outcome === 'finished') survey.isDone = true
+    if (outcome !== 'due') return
+    survey.isDone = true
+    survey.stage = 'ask'
+    await redrawRail($)
+  } finally {
+    survey.isBusy = false
+  }
+}
+
+// The survey was drawn on a band in view: mark it shown for good, and start
+// the time it stays when left alone.
+async function surveyDrawn($: EngineInterface, survey: Survey) {
   survey.timer = $.clock.after(STAR_SURVEY_MS, () => void hideSurvey($, survey))
-  await redrawRail($)
+  try {
+    const stored = await $.store.get(STAR_KEY)
+    if (isStar(stored)) await $.store.set(STAR_KEY, { ...stored, asked: true })
+  } catch {
+    // Unmarked, it may come again in a later session; nothing more is lost.
+  }
 }
 
 // Take the survey away: answered, left alone, or a prompt was sent.
 async function hideSurvey($: EngineInterface, survey: Survey) {
-  if (!survey.isShown) return
+  if (survey.stage === undefined) return
   survey.timer?.cancel()
   survey.timer = undefined
-  survey.isShown = false
+  survey.stage = undefined
   await redrawRail($)
+}
+
+// Star with gh and say how it went, off the press that asked for it, so a
+// slow gh holds nothing.
+async function starAndTell($: EngineInterface) {
+  $.ui.toast(await starWithGh($), { timeoutMs: STAR_TOAST_MS })
 }
 
 // Star the repository through gh, as the person is logged in there; what to
@@ -1285,7 +1323,7 @@ export const register: Register = (on, options) => {
   // Whether someone is there to answer the star survey (not a -p run), and
   // the survey itself (see jumpedForStar).
   let isInteractive = false
-  const survey: Survey = { isShown: false, isDone: false }
+  const survey: Survey = { isDrawn: false, isDone: false, isReachedHere: false, isBusy: false }
 
   // A change of the setting reloads this module with the new value.
   let mode: Mode = isMode(options.mode) ? options.mode : 'horizontal'
@@ -1452,14 +1490,16 @@ export const register: Register = (on, options) => {
       }
       const entry = entries[index]
       const target = entry && drawnRow(drawn, entry.id)
-      if (entry && target && (await jumpTo($, entry.id, target, unreachable, notices))) {
+      const outcome = entry && target ? await jumpTo($, entry.id, target, unreachable, notices) : undefined
+      if (entry && target && outcome === 'landed') {
         const jump = landOn(entry.id, target, index)
         $.clock.after(SETTLE_MAX_MS, () => {
           jump.isSettled = true
         })
         if (isDrawnStale()) await redrawRail($)
       }
-      if (entry && !notices.isUnscrollableSaid) await jumpedForStar($, survey, isInteractive && !isRunning)
+      // A refused jump (a view that cannot scroll, a row not drawn) is no use of the rail.
+      if (outcome !== undefined && outcome !== 'refused') await jumpedForStar($, survey, isInteractive && !isRunning)
       if (!entry) $.ui.toast(missingFor(e.command, asked))
       return {}
     }
@@ -1770,19 +1810,30 @@ export const register: Register = (on, options) => {
 
   // The star survey, a row of its own in the band above whatever the rest of
   // the band draws, as the engine's own surveys read: the question, then a
-  // digit for each answer, which a bare digit in an empty prompt presses.
+  // digit for each answer, which a bare digit in an empty prompt presses. A
+  // first 1 only asks to confirm, so a 1 typed to start a prompt stars nothing.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     await $.state.get(MOVED)
     const rest = await next(e)
-    if (!survey.isShown || e.props.hasSurvey) return rest
+    if (survey.stage === undefined || e.props.hasSurvey) return rest
+    // Drawn where it can be seen: from now on it counts as shown, and is timed.
+    if (!e.props.isCollapsed && !survey.isDrawn) {
+      survey.isDrawn = true
+      $.clock.after(0, () => void surveyDrawn($, survey))
+    }
     const { Box, Text, Button } = $.ui.resolve(e)
+    const isAsking = survey.stage === 'ask'
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" paddingLeft={RAIL_INSET}>
-          <Text>Enjoying prompt-rail? Star it on GitHub? </Text>
-          <Button key="star-yes" plain hotkey="1" label="Star it with gh" onPress={() => {}} />
+          <Text>{isAsking ? 'Enjoying prompt-rail? Star it on GitHub? ' : 'Star oikon48/prompt-rail with your gh login? '}</Text>
+          {isAsking ? (
+            <Button key="star-yes" plain hotkey="1" label="Star it with gh" onPress={() => {}} />
+          ) : (
+            <Button key="star-confirm" plain hotkey="1" label="Yes, star it" onPress={() => {}} />
+          )}
           <Text>  </Text>
-          <Button key="star-no" plain hotkey="0" label="No thanks" onPress={() => {}} />
+          <Button key="star-no" plain hotkey="0" label={isAsking ? 'No thanks' : 'Cancel'} onPress={() => {}} />
         </Box>
         {rest}
       </Box>
@@ -2014,13 +2065,18 @@ export const register: Register = (on, options) => {
 
   // Scroll from the press dispatch itself (a click).
   on('ui.press', { plugin: 'prompt-rail' }, async ($, e, next) => {
-    // The star survey's answers: 1 stars with the person's gh login, 0 declines.
-    // The press is handed on first: once the survey is hidden, its buttons
-    // hold no handler for the engine to press.
-    if (e.element === 'star-yes' || e.element === 'star-no') {
+    // The star survey's answers: a first 1 asks to confirm, a second stars
+    // with the person's gh login, 0 declines or cancels. The press is handed
+    // on first: once the row changes, its buttons hold no handler to press.
+    if (e.element === 'star-yes' || e.element === 'star-confirm' || e.element === 'star-no') {
       const result = await next(e)
+      if (e.element === 'star-yes' && survey.stage === 'ask') {
+        survey.stage = 'confirm'
+        await redrawRail($)
+        return result
+      }
       await hideSurvey($, survey)
-      if (e.element === 'star-yes') $.ui.toast(await starWithGh($), { timeoutMs: STAR_TOAST_MS })
+      if (e.element === 'star-confirm') void starAndTell($).catch(() => {})
       return result
     }
     // The steps beside the bars under the prompt name no prompt of their own.
@@ -2029,14 +2085,15 @@ export const register: Register = (on, options) => {
     unring()
     const entry = entries[index]
     const target = entry && drawnRow(drawn, entry.id)
-    if (entry && target && (await jumpTo($, entry.id, target, unreachable, notices))) {
+    const outcome = entry && target ? await jumpTo($, entry.id, target, unreachable, notices) : undefined
+    if (entry && target && outcome === 'landed') {
       const jump = landOn(entry.id, target, index)
       $.clock.after(SETTLE_MAX_MS, () => {
         jump.isSettled = true
       })
       if (isDrawnStale()) await redrawRail($)
     }
-    if (entry && !notices.isUnscrollableSaid) await jumpedForStar($, survey, isInteractive && !isRunning)
+    if (outcome !== undefined && outcome !== 'refused') await jumpedForStar($, survey, isInteractive && !isRunning)
     return next(e)
   })
 }

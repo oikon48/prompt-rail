@@ -2394,6 +2394,7 @@ const starWorld = (on: any, star: unknown, gh: { exitCode: number; stderr?: stri
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
   on('prompt.submit', ($: any, e: any) => ({ text: e.text }))
+  on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
   const runs: { argv: string[]; init: any }[] = []
   on('process.run', ($: any, e: any) => {
     runs.push({ argv: [...e.argv], init: e.init })
@@ -2414,81 +2415,123 @@ const startStarSession = async ($: any, isInteractive = true) => {
   await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive })
   await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
 }
-// The band, and the survey's buttons in it as a survey row reads them.
-const bandSurvey = async ($: any, surface: 'terminal' | 'desktop' = 'terminal', props: Record<string, unknown> = {}) => {
+// The band, and the survey's buttons in it as a survey row reads them; the
+// clock is run on, so a survey drawn there is marked shown.
+const bandSurvey = async ($: any, clock: any, surface: 'terminal' | 'desktop' = 'terminal', props: Record<string, unknown> = {}) => {
   const band = await $.ui.mount({ plugin: 'prompt-rail', surface, component: 'AbovePrompt', props: { ...BAND, isCollapsed: false, ...props } })
+  await clock.advance(0)
   const buttons = (await band.findAll({ type: 'Button' })).filter((b: any) => b.props.hotkey !== undefined).map((b: any) => `${b.props.hotkey}: ${b.props.label}`)
   return { band, buttons }
 }
 const SURVEY = ['1: Star it with gh', '0: No thanks']
+const CONFIRM = ['1: Yes, star it', '0: Cancel']
 
 for (const surface of SURFACES) {
-  test(`on the ${surface}, a jump in a later session shows the star survey in the band, and 1 stars the repository with gh`, async ($, on) => {
-    const { disk, store, runs } = starWorld(on, DUE)
+  test(`on the ${surface}, a jump in a later session shows the star survey, and 1 then 1 again stars the repository with gh`, async ($, on) => {
+    const { disk, store, clock, runs } = starWorld(on, DUE)
     await startStarSession($)
-    expect((await bandSurvey($, surface)).buttons).toEqual([])
+    expect((await bandSurvey($, clock, surface)).buttons).toEqual([])
     await clickFirst($)
-    const { band, buttons } = await bandSurvey($, surface)
+    const { band, buttons } = await bandSurvey($, clock, surface)
     expect(buttons).toEqual(SURVEY)
     expect(await band.find({ type: 'Text', text: /Star it on GitHub\?/ })).toBeDefined()
-    // Marked as asked once shown, so a reload or another session never shows it again.
+    // Marked as asked once drawn, so a reload or another session never shows it again.
     expect(store.get('star')).toEqual(expect.objectContaining({ asked: true }))
+    // A first 1 only asks to confirm: a 1 typed to start a prompt stars nothing.
     await band.press({ key: 'star-yes' })
+    expect(runs).toEqual([])
+    const confirm = await bandSurvey($, clock, surface)
+    expect(confirm.buttons).toEqual(CONFIRM)
+    await confirm.band.press({ key: 'star-confirm' })
     expect(runs.map(run => run.argv)).toEqual([GH_STAR])
     expect(runs[0]?.init?.env).toEqual(expect.objectContaining({ GH_PROMPT_DISABLED: '1' }))
     expect(disk.toasts.filter(text => text.startsWith('starred'))).toHaveLength(1)
-    expect((await bandSurvey($, surface)).buttons).toEqual([])
+    expect((await bandSurvey($, clock, surface)).buttons).toEqual([])
     await clickFirst($)
-    expect((await bandSurvey($, surface)).buttons).toEqual([])
+    expect((await bandSurvey($, clock, surface)).buttons).toEqual([])
   })
 }
 
 test('0 declines: nothing is run, the survey goes and never comes back', async ($, on) => {
-  const { runs } = starWorld(on, DUE)
+  const { clock, runs } = starWorld(on, DUE)
   await startStarSession($)
   await clickFirst($)
-  const { band } = await bandSurvey($)
+  const { band } = await bandSurvey($, clock)
   await band.press({ key: 'star-no' })
   expect(runs).toEqual([])
-  expect((await bandSurvey($)).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
   await clickFirst($)
-  expect((await bandSurvey($)).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
+})
+
+test('0 at the confirmation cancels: nothing is run', async ($, on) => {
+  const { clock, runs } = starWorld(on, DUE)
+  await startStarSession($)
+  await clickFirst($)
+  await (await bandSurvey($, clock)).band.press({ key: 'star-yes' })
+  await (await bandSurvey($, clock)).band.press({ key: 'star-no' })
+  expect(runs).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
 })
 
 test('a survey left alone goes after a while', async ($, on) => {
   const { clock } = starWorld(on, DUE)
   await startStarSession($)
   await clickFirst($)
-  expect((await bandSurvey($)).buttons).toEqual(SURVEY)
-  await clock.advance(60_000)
-  expect((await bandSurvey($)).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual(SURVEY)
+  await clock.advance(30_000)
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
 })
 
 test('a prompt sent while the survey shows takes it away', async ($, on) => {
-  const { runs } = starWorld(on, DUE)
+  const { clock, runs } = starWorld(on, DUE)
   await startStarSession($)
   await clickFirst($)
+  expect((await bandSurvey($, clock)).buttons).toEqual(SURVEY)
   await submit($, 'next question')
-  expect((await bandSurvey($)).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
   expect(runs).toEqual([])
 })
 
-test('the survey yields to a survey of the engine, and keeps its place in the below layout', async ($, on) => {
-  starWorld(on, DUE)
+for (const [name, props] of [['an engine survey holds the band', { hasSurvey: true }], ['the band is collapsed', { isCollapsed: true }]] as const) {
+  test(`while ${name}, the survey waits undrawn, unspent and not timed`, async ($, on) => {
+    const { store, clock } = starWorld(on, DUE)
+    await startStarSession($)
+    await clickFirst($)
+    await bandSurvey($, clock, 'terminal', props)
+    expect(store.get('star')).toEqual(DUE)
+    await clock.advance(60_000)
+    expect((await bandSurvey($, clock)).buttons).toEqual(SURVEY)
+    expect(store.get('star')).toEqual(expect.objectContaining({ asked: true }))
+  })
+}
+
+test('the survey keeps its place in the below layout', async ($, on) => {
+  const { clock } = starWorld(on, DUE)
   await startStarSession($)
   await jumpWith($, 'below')
   await clickFirst($)
-  expect((await bandSurvey($)).buttons).toEqual(SURVEY)
-  expect((await bandSurvey($, 'terminal', { hasSurvey: true })).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual(SURVEY)
 })
 
 test('the session that reaches the threshold shows no survey', async ($, on) => {
-  const { store } = starWorld(on, { jumps: 9 })
+  const { store, clock } = starWorld(on, { jumps: 9 })
   await startStarSession($)
   await clickFirst($)
   expect(store.get('star')).toEqual({ jumps: 10, crossedIn: 's1' })
   await clickFirst($)
-  expect((await bandSurvey($)).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
+})
+
+test('a /clear right after reaching the threshold shows no survey in the same sitting', async ($, on) => {
+  const { disk, clock } = starWorld(on, { jumps: 9 })
+  await startStarSession($)
+  await clickFirst($)
+  disk.sessionId = 's2'
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  await $.classic.SessionStart({ source: 'clear', session_id: 's2', transcript_path: '/t/s1.jsonl' })
+  await clickFirst($)
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
 })
 
 test('a prompt that does not exist is not counted as a jump', async ($, on) => {
@@ -2499,33 +2542,33 @@ test('a prompt that does not exist is not counted as a jump', async ($, on) => {
 })
 
 test('a jump while a turn runs shows no survey until the turn ends', async ($, on) => {
-  const { store } = starWorld(on, DUE)
+  const { store, clock } = starWorld(on, DUE)
   await startStarSession($)
   await $.turn.start({ text: 'continue', turnId: 't1' })
   await clickFirst($)
-  expect((await bandSurvey($)).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
   expect(store.get('star')).toEqual(DUE)
   await endTurn($, 't1')
   await clickFirst($)
-  expect((await bandSurvey($)).buttons).toEqual(SURVEY)
+  expect((await bandSurvey($, clock)).buttons).toEqual(SURVEY)
 })
 
 test('a session with nobody to answer leaves the survey for a later one', async ($, on) => {
-  const { store } = starWorld(on, DUE)
+  const { store, clock } = starWorld(on, DUE)
   await startStarSession($, false)
   await clickFirst($)
-  expect((await bandSurvey($)).buttons).toEqual([])
+  expect((await bandSurvey($, clock)).buttons).toEqual([])
   expect(store.get('star')).toEqual(DUE)
 })
 
 for (const [name, gh] of [['gh not logged in', { exitCode: 1, stderr: 'gh: To get started with GitHub CLI, please run:  gh auth login\n' }], ['no gh to start', new Error('gh failed to start: ENOENT')]] as const) {
-  test(`with ${name}, 1 gives the repository link instead`, async ($, on) => {
-    const { disk } = starWorld(on, DUE, gh)
+  test(`with ${name}, the confirmed star gives the repository link instead`, async ($, on) => {
+    const { disk, clock } = starWorld(on, DUE, gh)
     await startStarSession($)
     await clickFirst($)
-    const { band } = await bandSurvey($)
-    await band.press({ key: 'star-yes' })
-    expect(disk.toasts.filter(text => text.includes('https://github.com/oikon48/prompt-rail'))).toHaveLength(1)
+    await (await bandSurvey($, clock)).band.press({ key: 'star-yes' })
+    await (await bandSurvey($, clock)).band.press({ key: 'star-confirm' })
+    expect(disk.toasts.filter(text => text.startsWith('star it at https://github.com/oikon48/prompt-rail'))).toHaveLength(1)
     expect(disk.toasts.filter(text => text.startsWith('starred'))).toEqual([])
   })
 }
