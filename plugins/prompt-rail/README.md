@@ -43,7 +43,7 @@ In the horizontal layout, `ctrl+x tab` moves the focus to the bars: `←` `→` 
 
 This section is prompt-rail's privacy policy: what it reads, runs, and stores.
 
-prompt-rail makes no network requests of its own and sends nothing anywhere, neither the transcript it reads nor your prompts. It collects no analytics, and its author receives no data from it. Everything it does stays on your machine, save the one GitHub star you may choose to give it (see the last item below):
+prompt-rail never sends the transcript it reads or your prompts anywhere. It collects no analytics, and its author receives no data from it. It makes one network request in all, and only if you confirm it: a call through your GitHub CLI (`gh`) to `api.github.com` that stars this repository on your account, which sends GitHub that request and nothing else (see the last item below). Everything else it does stays on your machine:
 
 - It reads the current session's transcript file (the `.jsonl` file Claude Code writes for the session) to list your prompts and their turns.
 - Where no hook names that file, as on a machine with managed settings or in a Team or Enterprise organization, where Claude Code's security default keeps the classic hooks from installed plugins, it looks for the file where Claude Code keeps it: `projects/<folder>/<session id>.jsonl` under the config folder the mod is installed in, the folder named after the session's working directory. It checks whether that file exists, and for a working directory whose folder name Claude Code shortens, it lists the folder names under `projects` to find the one that matches. It reads no other file there.
