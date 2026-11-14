@@ -8,7 +8,7 @@ It needs Claude Code v2.1.287 or later, in the terminal or in the Code tab of th
 
 ## Install
 
-From the Claude directory, or from the plugin's own marketplace:
+From the plugin's own marketplace:
 
 ```bash
 claude plugin marketplace add oikon48/prompt-rail

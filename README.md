@@ -138,14 +138,6 @@ claude plugin test plugins/prompt-rail
 
 Run `/plugin-types .claude/types` in a session here for type declarations. Bump the version in `plugins/prompt-rail/.claude-plugin/plugin.json` with each release, since installed copies update only when it changes.
 
-The Claude directory listing tracks the `release` branch rather than `main`, so merged changes reach it only when a release is pushed there. After a Release PR merges, publish it with:
-
-```bash
-git push origin main:release
-```
-
-The directory picks the new commit up within about six hours and scans it before it goes live.
-
 ## License
 
 [MIT](LICENSE)
