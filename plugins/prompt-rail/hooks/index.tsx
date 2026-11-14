@@ -1840,6 +1840,17 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // Core stacks one row of the band for each plugin, in chain order. The
+  // rail's row goes last, so the bars sit beside the prompt below every other
+  // mod's row, as they did when the band was one chain; the rows are passed on
+  // as they came, only reordered.
+  on('ui.render', { component: 'AbovePromptList', plugin: '*' }, async ($, e, next) => {
+    const rows = e.props.rows
+    const own = rows.filter(row => row.plugin === 'prompt-rail')
+    if (own.length === 0 || rows.at(-1)?.plugin === 'prompt-rail') return next(e)
+    return next({ ...e, props: { ...e.props, rows: [...rows.filter(row => row.plugin !== 'prompt-rail'), ...own] } })
+  })
+
   // The band above the prompt. Horizontal: the rail itself, a
   // row of ticks with the hovered prompt beside them. Vertical with a dock too
   // narrow to reveal beside a tick: hidden cards the rail's ticks reveal.

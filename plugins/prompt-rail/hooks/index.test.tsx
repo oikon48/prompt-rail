@@ -241,8 +241,9 @@ test('with no prompt on screen the text line shows the newest one and no bar is 
 test('the horizontal band rings its bars, starting on the one being read, and shows the ringed card for a while', async ($, on) => {
   const clock = mock.clock(on)
   const moves: (string | undefined)[] = []
-  // Stand in for the engine moving the ring.
-  on('ui.focus', ($: any, e: any) => {
+  // Stand in for the engine moving the ring, for every plugin's element: an
+  // event naming another plugin reaches a hook that names `*`.
+  on('ui.focus', { plugin: '*' }, ($: any, e: any) => {
     moves.push(e.element)
     return {}
   })
@@ -332,26 +333,36 @@ test('on the desktop the bars leave room beside them for the prompt being read',
   expect(String(label.text)).toMatch(/^#2 second/)
 })
 
-test('the band keeps what the mods after it draw, above the rail', async ($, on) => {
-  await drawPrompts($, on, 'cache 98% · 3:41')
-  const isBelow = (node: any) => node.type === 'Text' && node.text === 'cache 98% · 3:41'
-  const isRail = (node: any) => node.type === 'Button' || node.props?.key === 'card-0'
-  const expectBelowAboveRail = async (band: any) => {
-    const drawn = await band.findAll({})
-    expect(drawn.findIndex(isRail)).toBeGreaterThanOrEqual(0)
-    expect(drawn.findIndex(isBelow)).toBeGreaterThanOrEqual(0)
-    expect(drawn.findIndex(isBelow)).toBeLessThan(drawn.findIndex(isRail))
-  }
+// Each plugin's row of the band is its own, stacked by core: the rail keeps
+// what is beneath it in its row, and moves its row last, so the bars stay
+// beside the prompt below every other mod's row.
+test('the band keeps what is beneath the rail in its row', async ($, on) => {
+  mock.clock(on)
+  await drawPrompts($, on)
   await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
   for (const surface of SURFACES) {
     const band = await $.ui.mount({ plugin: 'prompt-rail', surface, component: 'AbovePrompt', props: BAND })
-    await expectBelowAboveRail(band)
+    expect(await band.keepsBeneath()).toBe(true)
     await band.unmount()
   }
   // A vertical rail too narrow to reveal beside its ticks keeps hidden cards in the band.
   await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 4) })
-  await expectBelowAboveRail(await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND }))
+  expect(await (await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })).keepsBeneath()).toBe(true)
+})
+
+test('the rail row goes below every other mod row in the band', async ($, on) => {
+  const order: string[][] = []
+  // Stand in for core stacking the rows it is handed.
+  on('ui.render', { component: 'AbovePromptList', plugin: '*' }, ($: any, e: any) => {
+    order.push(e.props.rows.map((row: any) => row.plugin))
+    return $.ui.resolve(e).Box({})
+  })
+  const row = (plugin: string, text: string) => ({ plugin, tree: { type: 'Text' as const, props: {}, children: [text] } })
+  const rows = [row('prompt-rail', 'bars'), row('cache-meter', 'cache 98% · 3:41'), row('other', 'other mod')]
+  const { view, scroll, hasSurvey, isWorking, maxRows, bodyColumns } = BAND
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePromptList', props: { view, scroll, hasSurvey, isWorking, maxRows, bodyColumns, isCollapsed: false, rows } })
+  expect(order.at(-1)).toEqual(['cache-meter', 'other', 'prompt-rail'])
 })
 
 test('a command names a prompt by number, first, last or the words it holds', () => {
