@@ -41,6 +41,8 @@ Mouse works best with `"tui": "fullscreen"`.
 
 ### Vertical, beside the transcript
 
+The top of the pane holds a card: the prompt being read, and the hovered prompt's text and turn painted over it. Close the pane with its close mark, or `ctrl+x x` while it has the focus, and a line in the band above the prompt takes its place, naming the prompt being read; click it to open the pane again.
+
 <img src="docs/vertical.png" alt="The vertical rail: one row per prompt in a pane beside the transcript, the prompt being read marked with a thick tick" width="480">
 
 ### Below, under the prompt
@@ -119,7 +121,7 @@ The rail lists the prompts of the live branch, so prompts abandoned with `/rewin
 <summary>Known limits</summary>
 
 - The mods API may still change between Claude Code releases.
-- The hover card with the turn summary is part of the horizontal and below rails.
+- The vertical rail shows the hover card at the top of its pane on the terminal; elsewhere its pane lists the prompts alone.
 - The below rail is the terminal's. The Claude desktop app draws it above the prompt, as the horizontal rail.
 - The Claude desktop app draws the horizontal rail and its hover cards, but a click cannot jump there. The app gives a plugin no way to scroll its transcript, so the rail says so once a session. The prompt being read is named beside the bars rather than on the line above them, since the app paints a card over that line without hiding what is under it. Checked with Claude Code 2.1.280, the app did not draw the vertical pane.
 - The dock width is shared by all plugin panes; drag its edge to narrow it, down to 24 columns.

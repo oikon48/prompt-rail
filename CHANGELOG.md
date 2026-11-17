@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added a card to the top of the vertical rail: it shows the prompt being read, dim, and hovering a row paints that prompt's card over it, the text folded over up to three rows and a summary of its turn on the row under them, as the horizontal and below rails show on hover. A pane too short for every prompt now keeps a window of rows around the prompt being read, `⋮` marking the rows above and below it, and drops the card when it would leave fewer than three rows
+- Added a way back to a vertical rail you closed: closing the pane by its close mark, or with `ctrl+x x` once `ctrl+x tab` has given it the focus, folds the rail away for the session, a reload of the mod too, and the band above the prompt keeps one line in its place, the prompt being read and where it is among the others (`━ #3/12 …`), which opens the pane again on a click. The same line stands in for a pane Claude Code keeps undrawn on a terminal too narrow to seat it. `/prompt-rail`, `/prompt-rail vertical` and `/prompt-rail-toggle` open it again too
+
 ## 0.10.0
 
 - Added a "Classic hooks" row to `/config` (#69): on a machine with managed settings or in a Team or Enterprise organization, Claude Code notes each session that the security default skipped prompt-rail's `classic.SessionStart` and `classic.Stop` hooks; turning the row off registers neither hook, which silences those notes and changes nothing else there, since the rail finds the transcript on its own. It stays on by default: without the classic hooks, a session resumed from another directory, or an install loaded with `--plugin-dir`, leaves the rail no transcript to read

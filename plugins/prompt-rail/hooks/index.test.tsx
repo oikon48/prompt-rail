@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { bar, configDirOf, drawnRow, findTranscript, isStarDue, jumpNotice, noteJump, noteScroll, pickPrompt, rowKey, stepFrom, streamRequests, tick, transcriptCandidates, turnLine } from './index.tsx'
+import { bar, configDirOf, drawnRow, findTranscript, isStarDue, jumpNotice, noteJump, noteScroll, pickPrompt, rowKey, stepFrom, streamRequests, tick, transcriptCandidates, isClosedByHand, turnLine, wrapLines } from './index.tsx'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -2022,7 +2022,9 @@ test('no rail draws a colored mark; how a turn went is left to its card', async 
   await $.command.run({ command: 'prompt-rail', args: 'vertical' })
   for (const [surface, placement] of [['terminal', 'dock'], ['desktop', 'inline']] as const) {
     const site = await $.ui.mount({ plugin: 'prompt-rail', surface, component: 'Pane', requestId: 'prompt-rail', props: pane(placement, 40) })
-    expect(await site.findAll({ type: 'Text' })).toEqual([])
+    // The dock's card at the top holds text, but no mark or color of its own.
+    const texts = await site.findAll({ type: 'Text' })
+    expect(texts.filter((t: any) => t.props?.color !== undefined || ['×', '•'].includes(String(t.text).trim()))).toEqual([])
     await site.unmount()
   }
   expect(await cardDetails($)).toEqual(['first · interrupted', 'second · API error', 'third · 1 tool · a.ts', 'fourth'])
@@ -2583,3 +2585,172 @@ for (const [name, gh] of [['gh not logged in', { exitCode: 1, stderr: 'gh: To ge
     expect(disk.toasts.filter(text => text.startsWith('starred'))).toEqual([])
   })
 }
+
+test('wrapLines folds a prompt into rows of cells, breaking between words where it can', () => {
+  expect(wrapLines('abcdef', 3, 3)).toEqual(['abc', 'def'])
+  expect(wrapLines('hello world again', 8, 3)).toEqual(['hello', 'world', 'again'])
+  expect(wrapLines('a  b\n c', 10, 2)).toEqual(['a b c'])
+})
+
+test('wrapLines counts wide characters as two cells and never splits one', () => {
+  expect(wrapLines('日本語です', 4, 3)).toEqual(['日本', '語で', 'す'])
+  expect(wrapLines('a日本', 2, 3)).toEqual(['a', '日', '本'])
+  // A run with no spaces too long for a row is cut where the row ends, not moved to the next.
+  expect(wrapLines('#7 日本語の文章です', 8, 3)).toEqual(['#7 日本', '語の文章', 'です'])
+})
+
+test('wrapLines ends the last row with an ellipsis when the prompt does not fit', () => {
+  expect(wrapLines('abcdefghij', 3, 2)).toEqual(['abc', 'de…'])
+  expect(wrapLines('hello world again', 8, 2)).toEqual(['hello', 'world a…'])
+  expect(wrapLines('日本語です', 4, 1)).toEqual(['日…'])
+})
+
+// The rows a pane card paints, their padding cut off.
+const cardRows = (card: any) => (card?.children ?? []).map((row: any) => String((row.children ?? []).join('')).trimEnd())
+
+test('a wide vertical rail reveals the hovered prompt and its turn at the top of the pane', async ($, on) => {
+  world(on, {}, TURNS)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
+  const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 40) })
+  // A hidden card per prompt, painted over the top of the pane by its row's hover.
+  const card = await rail.find({ key: 'card-0' })
+  expect(card?.props).toMatchObject({ display: 'none', position: 'absolute', top: 0, left: 0 })
+  expect(cardRows(card)).toEqual(['#1 first', '1m 23s · 4 tools · app.ts, README.md', '', ''])
+  expect(cardRows(await rail.find({ key: 'card-1' }))).toEqual(['#2 second', '7s', '', ''])
+  // The rows stay as they were: a tick and the prompt on one line.
+  expect((await rail.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ─ first', ' ─ second'])
+})
+
+test('the card at the top of a wide vertical rail folds a long prompt over its rows', async ($, on) => {
+  await drawPrompts($, on)
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: 'm3', props: prompt('why does the rail jump back to the newest prompt after a resume from another folder', null) })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
+  const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 30) })
+  expect(cardRows(await rail.find({ key: 'card-2' }))).toEqual(['#3 why does the rail jump', 'back to the newest prompt', 'after a resume from another…', ''])
+  // Unhovered, the top shows the prompt being read, dim.
+  expect(await rail.find({ type: 'Text', text: /^#2 second prompt\s*$/ })).toBeDefined()
+})
+
+test('a long prompt keeps its three rows in the card, its turn on the row under them', async ($, on) => {
+  world(on, {}, jsonl([
+    { type: 'user', uuid: 'u1', timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content: 'why does the rail jump back to the newest prompt after a resume from another folder' } },
+    { type: 'assistant', uuid: 'a1', timestamp: '2026-09-24T00:00:07.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  ]))
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
+  const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 30) })
+  expect(cardRows(await rail.find({ key: 'card-0' }))).toEqual(['#1 why does the rail jump', 'back to the newest prompt', 'after a resume from another…', '7s'])
+})
+
+
+test('only the person closing the vertical pane folds the rail away', () => {
+  const close = (kind: 'person' | 'plugin' | 'unload', id = 'prompt-rail') => ({ id, origin: { kind } })
+  expect(isClosedByHand(close('person'), 'vertical')).toBe(true)
+  // The rail's own close (a switch of layout) and an unload are not the person's.
+  expect(isClosedByHand(close('plugin'), 'vertical')).toBe(false)
+  expect(isClosedByHand(close('unload'), 'vertical')).toBe(false)
+  // The desktop keeps the pane in the other layouts too; closing it there is no fold.
+  expect(isClosedByHand(close('person'), 'horizontal')).toBe(false)
+  expect(isClosedByHand(close('person', 'another-pane'), 'vertical')).toBe(false)
+})
+
+const bandOf = ($: any) => $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+const startVertical = async ($: any, on: any, initial: Record<string, unknown> = {}, disk = beneath()) => {
+  world(on, { 'session-mode:s1': 'vertical', ...initial }, TRANSCRIPT, disk)
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  return disk
+}
+
+test('a rail folded away by hand stays closed, and a line in the band opens it again', async ($, on) => {
+  // As the session's own close by hand left it, before a reload of the module.
+  const disk = await startVertical($, on, { 'folded:s1': true })
+  expect(disk.panes).not.toContain('open prompt-rail')
+  // The line names the prompt being read, so the folded rail still tells where the reading is.
+  const line = await (await bandOf($)).find({ key: 'reopen' })
+  expect(line?.props.label).toMatch(/#\d+\/\d+ \S/)
+  await (await bandOf($)).press({ key: 'reopen' })
+  expect(disk.panes.at(-1)).toBe('open prompt-rail')
+  expect(await (await bandOf($)).find({ key: 'reopen' })).toBeUndefined()
+  // Opened again, the next reload seats it as usual.
+  disk.panes.length = 0
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  expect(disk.panes).toContain('open prompt-rail')
+})
+
+for (const args of ['', 'vertical']) {
+  test(`/prompt-rail ${args} unfolds a rail folded away by hand`, async ($, on) => {
+    const disk = await startVertical($, on, { 'folded:s1': true })
+    await $.command.run({ command: 'prompt-rail', args })
+    expect(disk.panes.at(-1)).toBe('open prompt-rail')
+    expect(await (await bandOf($)).find({ key: 'reopen' })).toBeUndefined()
+  })
+}
+
+test('the line also stands in for a pane the terminal has no room to seat, until it is drawn', async ($, on) => {
+  const disk = beneath()
+  disk.placed = false
+  await startVertical($, on, {}, disk)
+  expect(await (await bandOf($)).find({ key: 'reopen' })).toBeDefined()
+  // A wider terminal seats the waiting pane on its own.
+  await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: pane('dock', 30) })
+  expect(await (await bandOf($)).find({ key: 'reopen' })).toBeUndefined()
+})
+
+test('a fold kept from vertical draws no line in the other layouts', async ($, on) => {
+  await startVertical($, on, { 'folded:s1': true })
+  await $.command.run({ command: 'prompt-rail', args: 'horizontal' })
+  expect(await (await bandOf($)).find({ key: 'reopen' })).toBeUndefined()
+})
+
+test('a fold left from vertical is dropped once a session starts in another layout', async ($, on) => {
+  // Closed by hand, then /config switched the layout, which reloads the module.
+  const store = world(on, { 'session-mode:s1': 'horizontal', 'folded:s1': true })
+  await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+  await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+  // So a later switch back to vertical, by /config too, opens the pane as usual.
+  expect(store.has('folded:s1')).toBe(false)
+})
+
+const SWITCHES: [string, (session: any) => Promise<unknown>][] = [
+  ['a /clear the classic hooks tell of', $ => $.classic.SessionStart({ source: 'clear', session_id: 's2', transcript_path: '/t/s2.jsonl' })],
+  ['the next turn, with no hook to tell', $ => $.turn.start({ text: 'elsewhere', turnId: 't1' })],
+  ['the end of the conversation a /clear left', $ => $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })],
+]
+for (const [way, tell] of SWITCHES) {
+  test(`a fold by hand follows the session into another conversation, found by ${way}`, async ($, on) => {
+    const disk = beneath()
+    const store = world(on, { 'session-mode:s1': 'vertical', 'folded:s1': true }, TRANSCRIPT, disk)
+    on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+    on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
+    await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+    await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+    disk.sessionId = 's2'
+    await tell($)
+    // Kept under the conversation now on screen, so a reload keeps the pane closed.
+    expect(store.get('folded:s2')).toBe(true)
+    expect(store.has('folded:s1')).toBe(false)
+    // Opened again, the fold goes from the conversation that holds it.
+    await $.command.run({ command: 'prompt-rail', args: '' })
+    expect([...store.keys()].filter(key => key.startsWith('folded:'))).toEqual([])
+  })
+}
+
+test('a vertical rail taller than its pane keeps a window of rows around the prompt being read', async ($, on) => {
+  world(on, {}, jsonl([]))
+  for (let i = 1; i <= 10; i++) {
+    await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'UserMessage', requestId: `m${i}`, props: prompt(`prompt ${i}`, i === 7 ? { first: 0, last: 3, of: 4 } : null) })
+  }
+  await $.command.run({ command: 'prompt-rail', args: 'vertical' })
+  // Ten rows: the card and its gap take five, a mark above and below two, so three prompts show.
+  const rail = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: { ...pane('dock', 30), scroll: { offset: 0, bodyRows: 10 } } })
+  const labels = (await rail.findAll({ type: 'Button' })).map(b => b.props.label)
+  expect(labels).toEqual([' ─ prompt 6', ' ━ prompt 7', ' ─ prompt 8'])
+  expect((await rail.findAll({ type: 'Text', text: /⋮/ })).length).toBe(2)
+  await rail.unmount()
+  // Too short for the card beside a few rows: the rows alone, still around the one being read.
+  const short = await $.ui.mount({ plugin: 'prompt-rail', surface: 'terminal', component: 'Pane', requestId: 'prompt-rail', props: { ...pane('dock', 30), scroll: { offset: 0, bodyRows: 5 } } })
+  expect(await short.find({ key: 'card' })).toBeUndefined()
+  expect((await short.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual([' ─ prompt 6', ' ━ prompt 7', ' ─ prompt 8'])
+})
