@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
 
-- Added a card to the top of the vertical rail: it shows the prompt being read, dim, and hovering a row paints that prompt's card over it, the text folded over up to three rows and a summary of its turn on the row under them, as the horizontal and below rails show on hover. A pane too short for every prompt now keeps a window of rows around the prompt being read, `⋮` marking the rows above and below it, and drops the card when it would leave fewer than three rows
-- Added a way back to a vertical rail you closed: closing the pane by its close mark, or with `ctrl+x x` once `ctrl+x tab` has given it the focus, folds the rail away for the session, a reload of the mod too, and the band above the prompt keeps one line in its place, the prompt being read and where it is among the others (`━ #3/12 …`), which opens the pane again on a click. The same line stands in for a pane Claude Code keeps undrawn on a terminal too narrow to seat it. `/prompt-rail`, `/prompt-rail vertical` and `/prompt-rail-toggle` open it again too
+- Added a card to the top of the vertical rail: it shows the prompt being read, dim, and hovering a row paints that prompt's card over it, the text folded over up to three rows and a summary of its turn on the row under them, as the horizontal and below rails show on hover (#81). A pane too short for every prompt now keeps a window of rows around the prompt being read, `⋮` marking the rows above and below it, and drops the card when it would leave fewer than three rows
+- Added a way back to a vertical rail you closed: closing the pane by its close mark, or with `ctrl+x x` once `ctrl+x tab` has given it the focus, folds the rail away for the session, a reload of the mod too, and the band above the prompt keeps one line in its place, the prompt being read and where it is among the others (`━ #3/12 …`), which opens the pane again on a click. The same line stands in for a pane Claude Code keeps undrawn on a terminal too narrow to seat it. `/prompt-rail`, `/prompt-rail vertical` and `/prompt-rail-toggle` open it again too. The fold belongs to the session, so it stays through a `/clear` or a resume (#81)
+- Fixed a click on the rail that could leave Claude Code noting `ui.press hook skipped: threw ... no handler is held under handle N`: the rail now hands the press on before it redraws (#81)
 
 ## 0.10.0
 
