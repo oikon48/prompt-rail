@@ -43,7 +43,14 @@ Mouse works best with `"tui": "fullscreen"`.
 
 The top of the pane holds a card: the prompt being read, and the hovered prompt's text and turn painted over it. Close the pane with its close mark, or `ctrl+x x` while it has the focus, and a line in the band above the prompt takes its place, naming the prompt being read; click it to open the pane again.
 
-<img src="docs/vertical.png" alt="The vertical rail: one row per prompt in a pane beside the transcript, the prompt being read marked with a thick tick" width="480">
+<img src="docs/vertical.png" alt="The vertical rail: a card at the top of the pane with the hovered prompt and its turn, and under it one row per prompt, the prompt being read marked with a thick tick" width="640">
+
+<details>
+<summary>The vertical layout in motion</summary>
+
+<img src="docs/vertical.gif" alt="prompt-rail 0.11.0: hovering a row of the vertical rail shows its prompt and turn in the card, a click jumps there, closing the pane leaves a line above the prompt, and clicking the line opens the pane again" width="800">
+
+</details>
 
 ### Below, under the prompt
 
