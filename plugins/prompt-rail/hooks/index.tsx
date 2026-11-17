@@ -803,11 +803,16 @@ async function seatFold($: EngineInterface, mode: Mode, isTerminal: boolean): Pr
   return mode === 'vertical' && !isPlaced ? 'unseated' : undefined
 }
 
-// The person asked for the rail again: forget a fold by hand where it is
-// stored. A fold kept from another module's lifetime is known here: a session
-// starting in vertical reads it, and in another layout drops it.
-async function forgetFold($: EngineInterface, folded: Fold) {
-  if (folded === 'hand') await $.store.delete(await foldedKey($))
+// Keep a fold by hand stored under the conversation now on screen, so a
+// reload reads it; a fold gone (the person asked for the rail again) leaves
+// no key. A /clear or a resume moves the key to the new conversation, since
+// the fold belongs to the session, not the conversation. Returns the
+// conversation whose key holds the fold now.
+async function keepFold($: EngineInterface, folded: Fold, foldedFor: string | undefined) {
+  const holder = folded === 'hand' ? await $.session.id() : undefined
+  if (foldedFor !== undefined && foldedFor !== holder) await $.store.delete(`${FOLDED_KEY_PREFIX}${foldedFor}`)
+  if (holder !== undefined && holder !== foldedFor) await $.store.set(`${FOLDED_KEY_PREFIX}${holder}`, true)
+  return holder
 }
 
 // Whether a close is the person folding the vertical rail away (the pane's
@@ -1415,6 +1420,8 @@ export const register: Register = (on, options) => {
   // or opened but waiting undrawn (a terminal under 144 columns). Either way a
   // line in the band stands in for it and opens it again.
   let folded: Fold
+  // The conversation whose store key holds a fold by hand.
+  let foldedFor: string | undefined
   // The horizontal bar whose card the text line shows, while the ring is on
   // it, and the timer that stops showing it.
   let ringed: number | undefined
@@ -1521,8 +1528,10 @@ export const register: Register = (on, options) => {
     // /config), so a later switch back opens the pane as usual.
     const isFolded = (await $.store.get(await foldedKey($))) === true
     if (isFolded && mode !== 'vertical') await $.store.delete(await foldedKey($))
-    if (isFolded && mode === 'vertical') folded = 'hand'
-    else folded = await seatFold($, mode, isTerminal)
+    if (isFolded && mode === 'vertical') {
+      folded = 'hand'
+      foldedFor = id
+    } else folded = await seatFold($, mode, isTerminal)
     return next(e)
   })
 
@@ -1559,7 +1568,7 @@ export const register: Register = (on, options) => {
         await $.store.set(LAST_ON_KEY, mode)
         mode = 'off'
       }
-      await forgetFold($, folded)
+      foldedFor = await keepFold($, undefined, foldedFor)
       folded = await seatFold($, mode, isTerminal)
       await redrawRail($)
       await writeMode($, mode)
@@ -1598,7 +1607,7 @@ export const register: Register = (on, options) => {
       return {}
     }
     if (isMode(asked)) mode = asked
-    await forgetFold($, folded)
+    foldedFor = await keepFold($, undefined, foldedFor)
     folded = await seatFold($, mode, isTerminal)
     await redrawRail($)
     // Last: a changed setting reloads this module, which then starts in it.
@@ -1642,6 +1651,7 @@ export const register: Register = (on, options) => {
   // which silences those notes and changes nothing else there.
   if (options.classicHooks !== false) {
     on('classic.SessionStart', async ($, e, next) => {
+      foldedFor = await keepFold($, folded, foldedFor)
       if (e.source === 'clear') {
         forget()
         session = { id: e.session_id, path: e.transcript_path }
@@ -1678,6 +1688,7 @@ export const register: Register = (on, options) => {
     // First, as it may start the list over: the conversation this turn is in.
     const id = await $.session.id()
     if (isElsewhere(id)) await redrawRail($)
+    foldedFor = await keepFold($, folded, foldedFor)
     if (session?.path === undefined) session = { id, path: await transcriptOf($, id, launchCwd) }
     const path = session.path
     if (path === undefined && unfoundFor !== id) {
@@ -1757,6 +1768,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       forget()
+      foldedFor = await keepFold($, folded, foldedFor)
       await redrawRail($)
     }
     return next(e)
@@ -1836,7 +1848,7 @@ export const register: Register = (on, options) => {
     if (isClosedByHand(e, mode)) {
       folded = 'hand'
       railColumns = 0
-      await $.store.set(await foldedKey($), true)
+      foldedFor = await keepFold($, folded, foldedFor)
       redrawRailLater($)
     }
     return next(e)
@@ -2268,7 +2280,7 @@ export const register: Register = (on, options) => {
     // asking, so the engine seats it at any width.
     if (e.element === 'reopen') {
       const result = await next(e)
-      await forgetFold($, folded)
+      foldedFor = await keepFold($, undefined, foldedFor)
       folded = await seatFold($, mode, isTerminal)
       await redrawRail($)
       return result

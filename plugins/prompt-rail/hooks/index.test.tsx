@@ -2713,6 +2713,30 @@ test('a fold left from vertical is dropped once a session starts in another layo
   expect(store.has('folded:s1')).toBe(false)
 })
 
+const SWITCHES: [string, (session: any) => Promise<unknown>][] = [
+  ['a /clear the classic hooks tell of', $ => $.classic.SessionStart({ source: 'clear', session_id: 's2', transcript_path: '/t/s2.jsonl' })],
+  ['the next turn, with no hook to tell', $ => $.turn.start({ text: 'elsewhere', turnId: 't1' })],
+  ['the end of the conversation a /clear left', $ => $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })],
+]
+for (const [way, tell] of SWITCHES) {
+  test(`a fold by hand follows the session into another conversation, found by ${way}`, async ($, on) => {
+    const disk = beneath()
+    const store = world(on, { 'session-mode:s1': 'vertical', 'folded:s1': true }, TRANSCRIPT, disk)
+    on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+    on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
+    await $.classic.SessionStart({ source: 'resume', session_id: 's1', transcript_path: '/t/s1.jsonl' })
+    await $.session.start({ cwd: '/t', surface: 'terminal', isInteractive: true })
+    disk.sessionId = 's2'
+    await tell($)
+    // Kept under the conversation now on screen, so a reload keeps the pane closed.
+    expect(store.get('folded:s2')).toBe(true)
+    expect(store.has('folded:s1')).toBe(false)
+    // Opened again, the fold goes from the conversation that holds it.
+    await $.command.run({ command: 'prompt-rail', args: '' })
+    expect([...store.keys()].filter(key => key.startsWith('folded:'))).toEqual([])
+  })
+}
+
 test('a vertical rail taller than its pane keeps a window of rows around the prompt being read', async ($, on) => {
   world(on, {}, jsonl([]))
   for (let i = 1; i <= 10; i++) {
