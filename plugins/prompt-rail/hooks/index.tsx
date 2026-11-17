@@ -8,6 +8,12 @@ const RAIL_COLUMNS = 4
 // Below this many body columns the vertical rail has no room to reveal the
 // prompt beside a tick, so the band above the prompt shows it instead.
 const INLINE_REVEAL_MIN_COLUMNS = 12
+// Rows the card at the top of a docked rail takes: the hovered prompt folded
+// over up to three, its turn's details on the row after the text.
+const PANE_CARD_ROWS = 4
+// Rows a docked rail keeps under its card, for three prompts and the marks
+// above and below them; a shorter pane drops the card.
+const MIN_PANE_ROWS = 5
 // Cells a hover card keeps for the prompt's text beside the turn's details,
 // and the desktop's label of the prompt being read beside the bars.
 const MIN_CARD_TEXT = 12
@@ -20,6 +26,10 @@ const LEGACY_MODE_KEY = 'mode'
 // with no /config row for plugin fields), so a module reloaded mid-session
 // starts in it again. Keyed by session, so a later session starts clean.
 const SESSION_MODE_KEY_PREFIX = 'session-mode:'
+// `folded:<session id>` -> true while the person has closed the vertical pane
+// by hand, so a module reloaded mid-session (a changed setting) leaves it
+// closed. A line in the band opens it again (see the band's reopen line).
+const FOLDED_KEY_PREFIX = 'folded:'
 // The mode last on (vertical, horizontal or below), so `prompt-rail-toggle` turned
 // off has a mode to come back to; horizontal until another was written.
 const LAST_ON_KEY = 'last-on'
@@ -184,6 +194,43 @@ const oneLine = (text: string, width: number) => {
     used += cells(char)
   }
   return `${out}…`
+}
+
+// The prompt folded into at most `rows` rows of `width` cells, broken between
+// words where a word fits a row; the last row cut with an ellipsis when the
+// rest does not fit it.
+export const wrapLines = (text: string, width: number, rows: number) => {
+  const chars = [...text.replace(/\s+/g, ' ').trim()]
+  const lines: string[] = []
+  let at = 0
+  while (at < chars.length && lines.length < rows) {
+    const rest = chars.slice(at).join('')
+    if (lines.length === rows - 1 && cellWidth(rest) > width) {
+      lines.push(oneLine(rest, width))
+      break
+    }
+    let end = at
+    let used = 0
+    while (end < chars.length && used + cells(chars[end] ?? '') <= width) {
+      used += cells(chars[end] ?? '')
+      end++
+    }
+    // A row too narrow for one wide character still takes it, so the loop ends.
+    if (end === at) end = at + 1
+    // A cut through a word moves back to the space before it, if the row has
+    // one and the word fits a row of its own; a longer run (text with no
+    // spaces, as Japanese) is cut where the row ends.
+    if (end < chars.length && chars[end] !== ' ') {
+      const space = chars.lastIndexOf(' ', end - 1)
+      const after = chars.indexOf(' ', end)
+      const word = chars.slice(space + 1, after < 0 ? chars.length : after).join('')
+      if (space > at && cellWidth(word) <= width) end = space
+    }
+    lines.push(chars.slice(at, end).join('').trimEnd())
+    at = end
+    while (chars[at] === ' ') at++
+  }
+  return lines
 }
 
 // A stacked rail reads rows apart; a row of ticks needs upright bars to. A
@@ -733,14 +780,41 @@ export function transcriptCandidates(config: { dir: string; sep: string }, cwd: 
 
 // Open the pane where the mode draws the rail in it; close it elsewhere (off,
 // or horizontal or below on the terminal, where the band or the hint line
-// carries the rail).
+// carries the rail). False when the pane was opened but waits undrawn.
 async function seatRail($: EngineInterface, mode: Mode, isTerminal: boolean) {
   if (mode === 'off' || ((mode === 'horizontal' || mode === 'below') && isTerminal)) {
     await $.ui.close({ id: PANE })
-  } else {
-    await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
+    return true
   }
+  const opened = await $.ui.open({ id: PANE, title: 'Prompts', columns: RAIL_COLUMNS })
+  return opened.isPlaced
 }
+
+// Why the vertical rail has no pane on screen (see `folded` in register).
+type Fold = 'hand' | 'unseated' | undefined
+
+async function foldedKey($: EngineInterface) {
+  return `${FOLDED_KEY_PREFIX}${await $.session.id()}`
+}
+
+// Seat the rail for the mode; the fold that leaves (a vertical pane left undrawn).
+async function seatFold($: EngineInterface, mode: Mode, isTerminal: boolean): Promise<Fold> {
+  const isPlaced = await seatRail($, mode, isTerminal)
+  return mode === 'vertical' && !isPlaced ? 'unseated' : undefined
+}
+
+// The person asked for the rail again: forget a fold by hand where it is
+// stored. A fold kept from another module's lifetime is known here: a session
+// starting in vertical reads it, and in another layout drops it.
+async function forgetFold($: EngineInterface, folded: Fold) {
+  if (folded === 'hand') await $.store.delete(await foldedKey($))
+}
+
+// Whether a close is the person folding the vertical rail away (the pane's
+// close mark, ctrl+x x). The rail's own closes and an unload are not, and in
+// the other layouts the desktop's pane is no rail of the person's choosing.
+export const isClosedByHand = (e: { id: string; origin: { kind: string } }, mode: Mode) =>
+  e.id === PANE && e.origin.kind === 'person' && mode === 'vertical'
 
 // Write the mode setting, as a change in /config would; say so if refused.
 // The key stays fixed text in the call, so the Claude directory's checks can
@@ -1337,6 +1411,10 @@ export const register: Register = (on, options) => {
   // terminal); the focus event does not say which surface it came from.
   let isBandOnGrid = true
   let railColumns = 0
+  // Why the vertical rail has no pane on screen: closed by the person's hand,
+  // or opened but waiting undrawn (a terminal under 144 columns). Either way a
+  // line in the band stands in for it and opens it again.
+  let folded: Fold
   // The horizontal bar whose card the text line shows, while the ring is on
   // it, and the timer that stops showing it.
   let ringed: number | undefined
@@ -1438,7 +1516,13 @@ export const register: Register = (on, options) => {
     if (!isRunning) listedAtRest = entries.length
     // Unasked, the engine seats a pane only from 144 columns (110 once the
     // person has opened it with /prompt-rail); below that it waits undrawn.
-    await seatRail($, mode, isTerminal)
+    // A pane the person closed by hand stays closed until they ask again.
+    // A fold kept from vertical is dropped in another layout (switched in
+    // /config), so a later switch back opens the pane as usual.
+    const isFolded = (await $.store.get(await foldedKey($))) === true
+    if (isFolded && mode !== 'vertical') await $.store.delete(await foldedKey($))
+    if (isFolded && mode === 'vertical') folded = 'hand'
+    else folded = await seatFold($, mode, isTerminal)
     return next(e)
   })
 
@@ -1475,7 +1559,8 @@ export const register: Register = (on, options) => {
         await $.store.set(LAST_ON_KEY, mode)
         mode = 'off'
       }
-      await seatRail($, mode, isTerminal)
+      await forgetFold($, folded)
+      folded = await seatFold($, mode, isTerminal)
       await redrawRail($)
       await writeMode($, mode)
       return {}
@@ -1513,7 +1598,8 @@ export const register: Register = (on, options) => {
       return {}
     }
     if (isMode(asked)) mode = asked
-    await seatRail($, mode, isTerminal)
+    await forgetFold($, folded)
+    folded = await seatFold($, mode, isTerminal)
     await redrawRail($)
     // Last: a changed setting reloads this module, which then starts in it.
     if (!isMode(asked)) return {}
@@ -1744,9 +1830,26 @@ export const register: Register = (on, options) => {
     return `${oneLine(entry.text, room)} · ${details}`
   }
 
+  // The person closing the vertical pane folds the rail away: it stays closed
+  // for the session, a reload too, and the band offers a line to open it again.
+  on('ui.close', async ($, e, next) => {
+    if (isClosedByHand(e, mode)) {
+      folded = 'hand'
+      railColumns = 0
+      await $.store.set(await foldedKey($), true)
+      redrawRailLater($)
+    }
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     // Read so a moved prompt being read draws the pane again (see MOVED).
     await $.state.get(MOVED)
+    // A pane that waited undrawn is drawn now: the band's line has done its part.
+    if (folded === 'unseated') {
+      folded = undefined
+      redrawRailLater($)
+    }
     const { Box, Text, Button } = $.ui.resolve(e)
     const isRail = e.props.placement === 'dock' && e.surface === 'terminal'
     if (noteView(e.props.view.agentId) && mode === 'below') redrawRailLater($)
@@ -1772,22 +1875,68 @@ export const register: Register = (on, options) => {
     if (isRail) {
       const hasRoom = e.props.bodyColumns >= INLINE_REVEAL_MIN_COLUMNS
       const width = Math.max(4, e.props.bodyColumns - 4)
+      // With room for text, the top of the pane holds a card: the prompt being
+      // read, dim (the newest when none is known), and over it the hovered
+      // prompt's card, its text folded over the rows and its turn summed up.
+      const cardWidth = e.props.bodyColumns - 2
+      // Every row painted to the card's width, blank ones too, so a hovered
+      // card hides the dim one beneath it whole. The turn's details, dim, go last.
+      const paint = (i: number, isDim: boolean) => {
+        const entry = entries[i]
+        const details = entry ? turnLine(turnOf(entry.id), cardWidth) : ''
+        const text = entry ? wrapLines(`#${i + 1} ${entry.text}`, cardWidth, PANE_CARD_ROWS - 1) : []
+        return Array.from({ length: PANE_CARD_ROWS }, (_, row) => {
+          const isDetails = details !== '' && row === text.length
+          return (
+            <Text key={`line-${row}`} dimColor={isDim || isDetails || undefined}>
+              {padTo(isDetails ? details : (text[row] ?? ''), cardWidth)}
+            </Text>
+          )
+        })
+      }
+      // The card only where a few rows still show under it.
+      const bodyRows = e.props.scroll.bodyRows
+      const hasCard = hasRoom && bodyRows >= PANE_CARD_ROWS + 1 + MIN_PANE_ROWS
+      // More prompts than rows: a window of rows centered on the prompt being
+      // read (the newest when none is known), `⋮` above and below for the rest.
+      const listRows = bodyRows - (hasCard ? PANE_CARD_ROWS + 1 : 0)
+      const isOverflowing = entries.length > listRows
+      const capacity = isOverflowing ? Math.max(1, listRows - 2) : entries.length
+      const center = current >= 0 ? current : entries.length - 1
+      const first = Math.min(Math.max(0, center - Math.floor(capacity / 2)), entries.length - capacity)
+      const mark = (key: string, isHiding: boolean) => (isOverflowing ? <Text key={key} dimColor>{isHiding ? ' ⋮' : ' '}</Text> : null)
+      const card = hasCard ? (
+        <Box key="card" flexDirection="column" height={PANE_CARD_ROWS} width={cardWidth} marginLeft={1} marginBottom={1}>
+          {paint(current >= 0 ? current : entries.length - 1, true)}
+          {entries.map((_, i) => (
+            <Box key={`card-${i}`} flexDirection="column" position="absolute" top={0} left={0} display="none" hover={{ scope: `prompt-rail-${i}`, display: 'flex' }}>
+              {paint(i, false)}
+            </Box>
+          ))}
+        </Box>
+      ) : null
       return (
         <Box flexDirection="column">
-          {entries.map((entry, i) => (
-            <Button
-              key={`jump-${i}`}
-              plain
-              dimColor={i !== current}
-              label={
-                hasRoom
-                  ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`
-                  : ` ${tick(i === current, isUnreachable(i))} `
-              }
-              hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
-              onPress={() => {}}
-            />
-          ))}
+          {card}
+          {mark('above', first > 0)}
+          {entries.slice(first, first + capacity).map((entry, offset) => {
+            const i = first + offset
+            return (
+              <Button
+                key={`jump-${i}`}
+                plain
+                dimColor={i !== current}
+                label={
+                  hasRoom
+                    ? ` ${tick(i === current, isUnreachable(i))} ${oneLine(entry.text, width)}`
+                    : ` ${tick(i === current, isUnreachable(i))} `
+                }
+                hover={{ scope: `prompt-rail-${i}`, inverse: true, dimColor: false }}
+                onPress={() => {}}
+              />
+            )
+          })}
+          {mark('below', first + capacity < entries.length)}
         </Box>
       )
     }
@@ -1862,6 +2011,31 @@ export const register: Register = (on, options) => {
     // Below the prompt on the terminal, the hint line carries the rail.
     if (mode === 'below' && e.surface === 'terminal') return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
+    // The vertical rail folded away: one line where the reading is, the heavy
+    // tick of the rail's own rows before it, which opens the pane on a click.
+    if (mode === 'vertical' && folded !== undefined) {
+      const below = await next(e)
+      const current = currentIndex()
+      drawnCurrent = current
+      const at = current >= 0 ? current : entries.length - 1
+      const head = `${tick(true)} #${at + 1}/${entries.length} `
+      const width = Math.max(MIN_CARD_TEXT, e.props.bodyColumns - RAIL_INSET - 1)
+      return (
+        <Box flexDirection="column">
+          {below}
+          <Box paddingLeft={RAIL_INSET}>
+            <Button
+              key="reopen"
+              plain
+              dimColor
+              label={`${head}${oneLine(entries[at]?.text ?? '', width - cellWidth(head))}`}
+              hover={{ scope: 'reopen', inverse: true, dimColor: false }}
+              onPress={() => {}}
+            />
+          </Box>
+        </Box>
+      )
+    }
     // Every mod shares the band, and a tree returned here replaces what the
     // mods after this one draw. Keep theirs, above the rail, so the bars stay
     // beside the prompt.
@@ -2090,6 +2264,18 @@ export const register: Register = (on, options) => {
       if (e.element === 'star-confirm') void starAndTell($).catch(() => {})
       return result
     }
+    // The folded rail's line: open the pane again. A press is the person's
+    // asking, so the engine seats it at any width.
+    if (e.element === 'reopen') {
+      const result = await next(e)
+      await forgetFold($, folded)
+      folded = await seatFold($, mode, isTerminal)
+      await redrawRail($)
+      return result
+    }
+    // A jump redraws the rail, and a redrawn button holds no handler to press,
+    // so the press is handed on before the scroll.
+    const result = await next(e)
     // The steps beside the bars under the prompt name no prompt of their own.
     const dir = e.element === 'step-next' ? 1 : e.element === 'step-prev' ? -1 : 0
     const index = dir === 0 ? Number(/^jump-(\d+)/.exec(e.element)?.[1]) : stepFrom(currentIndex(), entries.length, dir, isUnreachable)
@@ -2105,6 +2291,6 @@ export const register: Register = (on, options) => {
       if (isDrawnStale()) await redrawRail($)
     }
     if (outcome !== undefined && outcome !== 'refused') await jumpedForStar($, survey, isInteractive && !isRunning)
-    return next(e)
+    return result
   })
 }
